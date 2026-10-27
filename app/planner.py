@@ -989,7 +989,8 @@ class Planner:
 
     # ------------------------------------------------------------ 主入口
     def analyze(self, client, roots: list[P115Item],
-                progress: Optional[Callable[[int, int, str], None]] = None
+                progress: Optional[Callable[[int, int, str], None]] = None,
+                trace: Optional[Callable[[PlanItem], None]] = None
                 ) -> list[PlanItem]:
         if progress:
             progress(0, 0, "正在扫描目录…")
@@ -1010,8 +1011,10 @@ class Planner:
             if progress:
                 progress(idx - 1, total,
                          f"正在分析：{mr.item.name}（读取目录/联网查询）")
+            built: list[PlanItem] = []
             try:
-                plans += self._build_plans(client, mr)
+                built = self._build_plans(client, mr)
+                plans += built
             except Exception as e:
                 self.log(f"分析失败：{mr.item.name}：{e}")
                 p = PlanItem(item=mr.item, media_type="unknown",
@@ -1020,6 +1023,13 @@ class Planner:
                 p.note = f"分析失败：{e}"
                 p.selected = False
                 plans.append(p)
+                built = [p]
+            if trace:
+                for p in built:
+                    try:
+                        trace(p)
+                    except Exception as e:
+                        self.log(f"搜索诊断记录失败：{e}")
             if progress:
                 progress(idx, total, f"已分析：{mr.item.name}")
         self._apply_folder_versions(plans)
@@ -1170,7 +1180,11 @@ class Planner:
                 container = True
             elif len(distinct) >= 2 and folder_title and \
                     not any(titles_agree(folder_title, t) for t in distinct):
-                container = True
+                # 目录名是“某某”而文件是“某某 第X季”“某某 OVA”这类
+                # 同一部剧的变体时，它仍是一部剧的目录，不能当成多剧合集；
+                # 否则文件夹会因为“文件级标题不一致”而被判成认不得。
+                container = not episodic or any(
+                    titles_agree(folder_title, t) for t in distinct)
         # 选中的目录本身是季目录/分卷目录时，不能把它当成剧集根目录改名
         if mr.item.is_dir and (is_season_dir(mr.item.name) or is_part_dir(mr.item.name)):
             container = True
@@ -1182,6 +1196,19 @@ class Planner:
                 key = norm_title(e.parsed.title) or \
                     norm_title(strip_season_markers(folder_title)) or "unknown"
                 groups.setdefault(key, []).append(e)
+            # 同一部剧的季号变体（“X”与“X 第二季”/“X 第四季”）只是
+            # 文件名写法不同，按标题分组会把文件夹拆散；这里合并成一组。
+            merged: dict[str, list[FileEntry]] = {}
+            for key, group in groups.items():
+                base = norm_title(strip_season_markers(key))
+                target = next((k for k in merged
+                               if norm_title(strip_season_markers(k)) == base),
+                              None)
+                if target is None:
+                    merged[key] = list(group)
+                else:
+                    merged[target].extend(group)
+            groups = merged
             # 目录名是中文、文件里写日文别名时（例如
             # “女子落语 [じょしらく]”里的“じょしらく S01E01”），
             # 不能因为中文字面不同就把整个目录当成合集。只要有一组
@@ -1416,18 +1443,55 @@ class Planner:
                     year = e.parsed.year
                     break
         season = folder_parsed.season
+        season_from_file = None
+        if season is None:
+            # 目录名没写 Sxx/第N季，但视频文件名是 S2E01 时，季号仍属于
+            # 这部剧；交回 _series_plan，让 TMDB 季结构按实际季校验。
+            # 只有季号一致的多数文件才采用，混季目录不硬套。
+            file_seasons = Counter(
+                e.parsed.season for e in title_entries
+                if (not anchor_ok or not e.parsed.title or
+                    titles_agree(e.parsed.title, title))
+                and e.parsed.season and e.parsed.season > 0)
+            if file_seasons:
+                season_from_file = file_seasons.most_common(1)[0][0]
         return ParsedName(raw=mr.item.name, title=title, queries=queries[:6],
                           year=year, season=season, is_episode=False,
-                          ext="", warnings=[],
-                          conflict_titles=conflict_titles)
+                          ext="", warnings=[], conflict_titles=conflict_titles,
+                          file_season=season_from_file)
 
     def _match(self, parsed: ParsedName, media_type: str,
                category_hint: str = "") -> MatchResult:
         try:
-            return self.metadata.match(parsed, media_type, category_hint)
+            res = self.metadata.match(parsed, media_type, category_hint)
         except Exception as e:
             self.log(f"元数据搜索失败：{parsed.title}：{e}")
             return MatchResult()
+        self._trace_match(parsed, res)
+        return res
+
+    @staticmethod
+    def _cand_brief(cand: Optional[Candidate]) -> str:
+        if not cand:
+            return "无"
+        sid = cand.sid or "?"
+        year = cand.year or "?"
+        return f"{cand.title}｜{year}｜{sid}｜{cand.score:.2f}"
+
+    def _trace_match(self, parsed: ParsedName, res: MatchResult) -> None:
+        """把这次自动搜索的关键信息记进备注，方便对照排查错配。
+
+        只记“用了哪些词、各来源选了什么、综合置信度多少”，候选过多时
+        只取各来源第一名，避免备注变成长日志。
+        """
+        if getattr(res, "trace", ""):
+            return    # ID/NFO 锚点等不走标题搜索，不需要重复记录
+        parts = [f"搜索词 {' / '.join(parsed.queries[:3]) or '无'}"]
+        for source, cand in (("豆瓣", res.douban), ("Bangumi", res.bangumi),
+                             ("IMDb", res.imdb), ("TMDB", res.tmdb)):
+            parts.append(f"{source} {self._cand_brief(cand)}")
+        parts.append(f"置信度 {res.confidence * 100:.0f}%")
+        res.trace = "；".join(parts)
 
     @staticmethod
     def _match_titles(match: MatchResult) -> list[str]:
@@ -1523,7 +1587,9 @@ class Planner:
             self._path_category_hints(context)
         ctx = (context or "").lower()
         us_anime_path = any(
-            k in ctx for k in ("美漫", "美国动画", "美国动漫"))
+            k in ctx for k in ("美漫", "美国动画", "美国动漫")) or bool(
+            re.search(r"(?<![A-Za-z])US(?:A)?[ ._\-]*(?:ANIMATION|ANIME)",
+                      ctx, re.I))
         animation = bool(match.animation)
         for c in (match.tmdb, match.imdb, match.bangumi, match.douban):
             if c and isinstance(c.extra, dict) and c.extra.get("animation"):
@@ -1540,6 +1606,20 @@ class Planner:
                 if note not in match.notes:
                     match.notes.append(note)
             return "tv"
+        # 文件夹明确在“动画/动漫/番剧/日番”下，但元数据明确不是动画：
+        # 动画目录里也可能放真人剧（日剧/国产剧），不能被目录名强行
+        # 改成动画命名。日语/中文原名里带假名时仍按日番/动画处理，
+        # 只有西文原名才放宽成电视剧；明确写着“美漫/美国动画”的目录除外。
+        if path_anime and not path_tv and match.country and not animation \
+                and not us_anime_path:
+            loose_latin = us_anime_path or match.country in (
+                "us", "uk", "ca", "west") or (
+                match.country in ("jp", "cn") and
+                re.search(r"[A-Za-z]{3,}", match.title_original or ""))
+            if loose_latin:
+                return "tv"
+        if path_anime and not path_tv and us_anime_path:
+            return "us_anime"
         # 文件夹明确在“动画/动漫/番剧/日番”下：按动画命名规则处理。
         if path_anime and not path_tv:
             if match.country == "jp":
@@ -1547,9 +1627,9 @@ class Planner:
             if match.country == "cn":
                 return "cn_anime"
             # 美漫单独归类；目录明确写“美漫/美国动画”时也按美漫处理。
-            if match.country == "us" or us_anime_path:
+            if match.country == "us" and animation:
                 return "us_anime"
-            if match.country in ("uk", "ca", "west"):
+            if match.country in ("uk", "ca", "west") and animation:
                 return "west_anime"
             if has_kana(match.title_original or "") or \
                     has_kana(parsed.title or "") or has_kana(context):
@@ -1795,6 +1875,8 @@ class Planner:
         p.context = {"mr": mr, "entries": [], "folder_parsed": parsed,
                      "imdb_id": imdb_id, "tmdb_id": tmdb_id}
         notes = list(match.notes)
+        if match.trace:
+            notes.append(match.trace)
         notes.append("蓝光 BDMV/VIDEO_TS 目录：只重命名最外层文件夹，"
                      "内部 BDMV/STREAM 等文件保持原样。")
         folder_name = ""
@@ -2023,6 +2105,10 @@ class Planner:
                      is_container: bool) -> Optional[PlanItem]:
         parsed = self._search_parsed(mr, entries, folder_parsed,
                                      prefer_file_title=is_container)
+        # 目录名没写季号、季号来自文件名时，用它补进搜索季号：
+        # 否则同一部剧会退化成“主剧条目”，集数无法按季校验/自动分季。
+        if parsed.season is None and parsed.file_season is not None:
+            parsed.season = parsed.file_season
         nfo_info = self._nfo_anchor(client, mr, "series", entries)
         self._apply_nfo_hints(parsed, nfo_info)
         if not parsed.title:
@@ -2078,12 +2164,16 @@ class Planner:
                 match.imdb = Candidate(
                     source="imdb", title=local["en"] or local["jp"],
                     original_title=local["en"] or local["jp"],
-                    year=local["year"], sid=local["imdb"], kind="tv")
+                    year=local["year"], sid=local["imdb"], kind="tv",
+                    extra={"aliases": [a for a in (local["en"], local["jp"])
+                                       if a]})
             if local["tmdb"]:
                 match.tmdb = Candidate(
                     source="tmdb", title=local["zh"],
                     original_title=local["en"] or local["jp"],
-                    year=local["year"], sid=local["tmdb"], kind="tv")
+                    year=local["year"], sid=local["tmdb"], kind="tv",
+                    extra={"aliases": [a for a in (local["en"], local["jp"])
+                                       if a]})
             id_match = match
         else:
             id_match = self._match_by_ids(parsed, "series", ex_imdb, ex_tmdb)
@@ -2131,6 +2221,8 @@ class Planner:
             parsed, match, id_anchored=bool(id_match or nfo_match))
         if conflict_note:
             notes.append(conflict_note)
+        if match.trace:
+            notes.append(match.trace)
         if conflict_note or \
                 match.confidence < self.options.min_auto_confidence:
             p.status = "review"
@@ -2199,6 +2291,8 @@ class Planner:
         notes = list(match.notes)
         if year is None:
             notes.append("缺少年份，文件名会省略年份。")
+        if match.trace:
+            notes.append(match.trace)
         p.status = "auto" if match.confidence >= self.options.min_auto_confidence else "review"
         p.note = "；".join(dict.fromkeys(notes))
         self.rebuild(p)

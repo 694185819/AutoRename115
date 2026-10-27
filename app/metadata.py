@@ -1519,17 +1519,53 @@ class MetadataClient:
 
     @classmethod
     def _anchor_titles(cls, parsed: ParsedName) -> list[str]:
-        """自动匹配必须对得上的本地标题/别名。"""
+        """自动匹配必须对得上的本地标题/别名。
+
+        目录名常把中英文写在一起（“异国日记 Ikoku Nikki”），整串和
+        官方条目很少逐字相同；必须把中文段、英文段也各算一个锚点，
+        否则正确候选会被锚点校验当成“无关候选”淘汰，任务只能进需确认。
+        """
+        parts: list[str] = []
+        for text in [parsed.title] + list(parsed.queries or []):
+            for part in cls._anchor_parts(str(text or "")):
+                if part not in parts:
+                    parts.append(part)
+        if parsed.file_season is not None:
+            # 本地没写季号、季号来自文件名时，“第一季/第二季”这类别名
+            # 不是可靠锚点：任何一季的官方标题都可能对得上。
+            parts = [p for p in parts if not cls._season_alias(p)]
         out: list[str] = []
         seen: set[str] = set()
-        for text in [parsed.title] + list(parsed.queries or []):
-            text = str(text or "").strip()
+        for text in parts:
             key = norm_title(text)
             if len(key) < 2 or key in cls._WEAK_ANCHOR_NAMES or key in seen:
                 continue
             seen.add(key)
             out.append(text)
         return out
+
+    @staticmethod
+    def _anchor_parts(text: str) -> list[str]:
+        """整串 + 其中文段 + 其英文/罗马字段。"""
+        text = str(text or "").strip()
+        if not text:
+            return []
+        out = [text]
+        for run in re.findall(r"[㐀-鿿぀-ヿ]{2,}", text):
+            out.append(run)
+        for run in re.findall(r"[A-Za-z][A-Za-z0-9'&!+\-]*(?:[ .][A-Za-z0-9'&!+\-]+)*",
+                              text):
+            run = run.strip(" .-")
+            if len(run) >= 3 and re.search(r"[A-Za-z]{2,}", run):
+                out.append(run)
+        return out
+
+    @staticmethod
+    def _season_alias(text: str) -> bool:
+        t = str(text or "").strip()
+        return bool(t) and (
+            re.fullmatch(r"(?i)(?:Season|S|第)\s*\d+\s*季?", t) is not None or
+            re.fullmatch(r"第[一二三四五六七八九十]+季", t) is not None)
 
     @staticmethod
     def _candidate_names(cand: Candidate) -> list[str]:
@@ -1539,26 +1575,70 @@ class MetadataClient:
         return [str(n).strip() for n in names if str(n or "").strip()]
 
     @classmethod
+    def _combo_anchors(cls, parsed: ParsedName) -> list[str]:
+        """本地整串名，以及按分隔符/中英文边界拆出的 3 字以上片段。"""
+        out: list[str] = []
+        texts = [parsed.title] + list(parsed.queries or [])
+        for text in texts:
+            text = str(text or "").strip()
+            if not text:
+                continue
+            for part in re.split(r"[\s/|,;:\[\]【】()（）·•]+", text):
+                part = part.strip(" -–—_.")
+                key = norm_title(part)
+                if len(key) < 3 or key in cls._WEAK_ANCHOR_NAMES:
+                    continue
+                if part not in out:
+                    out.append(part)
+            # 中英文混写没有分隔符时按字母/汉字边界再拆一次
+            for run in re.findall(r"[A-Za-z][A-Za-z0-9'&!+\-]*(?: [A-Za-z0-9'&!+\-]+)*",
+                                  text):
+                run = run.strip(" .-")
+                if len(norm_title(run)) >= 3 and run not in out:
+                    out.append(run)
+        return out
+
+    @staticmethod
+    def _names_really_agree(a: str, b: str) -> bool:
+        """锚点用的保守比较：短名只认包含或极相似，长名才允许轻微错字。"""
+        na, nb = norm_title(a), norm_title(b)
+        if not na or not nb:
+            return False
+        if na == nb:
+            return True
+        shorter, longer = (na, nb) if len(na) <= len(nb) else (nb, na)
+        if shorter in longer:
+            return True
+        return len(shorter) >= 4 and fuzz.WRatio(na, nb) >= 92
+
+    @classmethod
     def _candidate_matches_anchor(cls, cand: Candidate,
                                   anchors: list[str]) -> bool:
         """候选标题/别名是否和本地锚点有真正的文字重合。
 
         短锚点（2 个字）只接受完全同名，避免“剧版”命中
         “剧版超能陆战队番外短片”这种前缀伪匹配。
+        反向也成立：官方中文名较长、本地是简称（“女子落语”对
+        “女子落语 じょしらく”）时，本地名包含在官方名里也算对得上。
         """
         if not anchors:
             return True
+        names = cls._candidate_names(cand)
         for anchor in anchors:
             an = norm_title(anchor)
             if not an:
                 continue
-            for name in cls._candidate_names(cand):
+            for name in names:
                 cn = norm_title(name)
                 if not cn:
                     continue
                 if cn == an:
                     return True
-                if len(an) >= 3 and titles_agree(name, anchor):
+                if len(an) < 3:
+                    continue
+                if titles_agree(name, anchor):
+                    return True
+                if an in cn and len(an) >= 3:
                     return True
         return False
 
@@ -1571,6 +1651,7 @@ class MetadataClient:
             cand_titles += list(cand.extra["aliases"])
         cand_norms = [norm_title(t) for t in cand_titles if t]
         best_title = 0.0
+        exact_title = False
         for q in queries:
             qn = norm_title(q)
             # 单字搜索词（“剧”“番”）没有检索价值：partial_ratio 对任何
@@ -1580,12 +1661,25 @@ class MetadataClient:
             for cn in cand_norms:
                 if not cn:
                     continue
+                if qn == cn:
+                    best_title = 1.0
+                    exact_title = True
+                    continue
                 w = fuzz.WRatio(qn, cn) / 100.0
                 if len(qn) == 2:
                     best_title = max(best_title, w)
+                    continue
+                # partial_ratio 对“候选标题里含一段相同文字”给满分，
+                # 是“女子落语 OAD”抢走“女子落语”这类近似条目的来源。
+                # 只在两段文字长度接近时采用，分数也要打折。
+                shorter = min(len(qn), len(cn))
+                longer = max(len(qn), len(cn))
+                partial = fuzz.partial_ratio(qn, cn) / 100.0
+                if shorter >= max(4, int(longer * 0.6)):
+                    partial *= 0.85
                 else:
-                    best_title = max(best_title, w,
-                                     fuzz.partial_ratio(qn, cn) / 100.0 * 0.92)
+                    partial *= 0.6
+                best_title = max(best_title, w, partial)
 
         year_score = 0.6
         if parsed.year and cand.year:
@@ -1604,6 +1698,9 @@ class MetadataClient:
             score += 0.02
         if cand.source == "imdb" and re.search(r"[A-Za-z]", parsed.title or ""):
             score += 0.02
+        # full_exact：和本地名称（整串或其中某一段）完全相同；
+        # anchor_exact：再加上官方名本身含本地名的包含匹配，用来
+        # 防止番外/短片等近似条目抢占主条目。“Name OAD”不算精确。
         exact_title = (
             norm_title(cand.title) == norm_title(parsed.title) or
             norm_title(cand.original_title) == norm_title(parsed.title))
@@ -1612,11 +1709,26 @@ class MetadataClient:
             score += 0.04
         if not isinstance(cand.extra, dict):
             cand.extra = {}
-        anchor_norms = {
-            norm_title(a) for a in
-            ([parsed.title] + list(parsed.queries or [])) if a}
-        cand.extra["anchor_exact"] = int(any(
-            norm_title(n) in anchor_norms for n in cand_titles if n))
+        local_parts = {norm_title(p) for p in
+                       ([parsed.title] + list(parsed.queries or []))
+                       if norm_title(p)}
+        anchor_parts = {norm_title(p) for p in self._anchor_titles(parsed)
+                        if norm_title(p)}
+        cand_norm_set = {cn for cn in cand_norms if cn}
+        # 只认“候选名 == 本地整串/某一段”，以及“候选名含本地名”
+        # （官方名较长时）。反过来“本地含候选名”会让短候选
+        # （“女子落语OAD”对“女子落语[じょしらく]”）也算精确。
+        contains_local = any(
+            lp in cn for cn in cand_norm_set for lp in anchor_parts
+            if len(lp) >= 3)
+        cand.extra["anchor_exact"] = int(
+            bool(cand_norm_set & local_parts) or contains_local)
+        # 番外/短片：“女子落语 OAD”不能只看 partial 就当成主条目
+        weak_suffix = re.search(
+            r"(?i)(?:\b(?:OAD|OVA|SP|SPECIAL|SHORT)\b|短片|番外|小剧场|特别篇)",
+            cand.title or "")
+        if weak_suffix and not exact_title:
+            score = max(0.0, score - 0.15)
         # 季号明确时，第三季不能抢第四季的任务。
         if media_type == "series":
             cs = candidate_season(cand)
@@ -1994,6 +2106,26 @@ class MetadataClient:
         best_bg = self._pick_primary(bangumi_all, media_type)
         best_db = self._pick_primary(douban_all, media_type)
         best_tmdb = self._pick_primary(tmdb_all, media_type)
+        if not any((best_bg, best_db, best_tmdb)):
+            # 严格锚点把全部候选都淘汰时，再给一次“整串组合名”机会：
+            # 本地是“异国日记 Ikoku Nikki”而官方只有英文名时，严格
+            # 第一轮会一个都不剩；第二轮要求候选名和本地整串/分隔段
+            # 真正相似（不是 partial 包含），仍不满足就让任务进需确认。
+            combo = self._combo_anchors(parsed)
+            if combo:
+                def combo_ok(c: Candidate) -> bool:
+                    if not self._candidate_matches_anchor(c, combo):
+                        return False
+                    names = [norm_title(n) for n in
+                             self._candidate_names(c) if norm_title(n)]
+                    return any(self._names_really_agree(n, cp)
+                               for n in names for cp in combo)
+                best_bg = self._pick_primary(
+                    [c for c in bangumi_all if combo_ok(c)], media_type)
+                best_db = self._pick_primary(
+                    [c for c in douban_all if combo_ok(c)], media_type)
+                best_tmdb = self._pick_primary(
+                    [c for c in tmdb_all if combo_ok(c)], media_type)
         primary_pool = [c for c in (best_bg, best_db, best_tmdb) if c]
         primary = max(primary_pool, key=lambda c: c.score, default=None)
 

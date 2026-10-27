@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import base64
 import copy
+import hashlib
 import io
 import json
 import os
+import pickle
 import queue
 import re
 import tempfile
@@ -86,6 +88,9 @@ DEFAULT_SETTINGS = {
     # 首次使用（还没有 Cookie）时显示 115 风控提醒；勾选“只显示一次”后
     # 这里变为 True，下次启动不再打扰。
     "risk_notice_dismissed": False,
+    # 记住上次分析结果：账号/模式/根目录/视频文件都没变时，重启后直接
+    # 恢复等待列表，不必重新联网分析。执行改名或切换根目录后自动作废。
+    "remember_plans": True,
 }
 
 
@@ -162,6 +167,8 @@ class App(tk.Tk):
         self.current_item: P115Item | None = None
         self.detail_plan: PlanItem | None = None
         self.undo = UndoManager(self.data_dir)
+        # 预览缓存：最近一次成功写盘的时间戳，用于避免重复保存
+        self._plans_saved_stamp: float | None = None
 
         self._init_meta()
         self._build_ui()
@@ -465,8 +472,11 @@ class App(tk.Tk):
         self.plan_menu.add_separator()
         self.plan_menu.add_command(label="从等待列表移除",
                                    command=self.remove_current_plan)
+        self.plan_menu.add_separator()
         self.plan_menu.add_command(label="清空等待列表",
                                    command=self.clear_plans)
+        self.plan_menu.add_command(label="恢复上次分析结果（不联网）",
+                                   command=self.restore_plans_manual)
 
         # 详情
         detail = ttk.LabelFrame(right, text="选中项详情（可修改标题/年份/季/分类后重新预览）",
@@ -701,6 +711,10 @@ class App(tk.Tk):
                 return
             if payload:
                 self._set_login_status("已登录", "#176b33")
+                # 先恢复上次等待列表，再刷新目录；恢复成功后不能再
+                # 立刻发起新的忙碌任务（会互相覆盖进度状态）。
+                if self._restore_plans():
+                    return
                 self.refresh()
             else:
                 self._set_login_status("登录已失效", "#b3261e")
@@ -713,6 +727,20 @@ class App(tk.Tk):
             review = sum(1 for p in self.plans if p.status == "review")
             self.status_var.set(f"分析完成：{len(self.plans)} 项，可自动 {auto}，需确认 {review}")
             self._log(self.status_var.get())
+            self._save_plans_cache()
+        elif kind == "plans_verified":
+            ok, reason = payload
+            self._set_busy(False)
+            if ok:
+                self._log("离线恢复完成：文件均仍在原处，可以直接应用重命名。")
+                self.status_var.set(
+                    f"已恢复 {len(self.plans)} 个等待任务（缓存）")
+            else:
+                self.plans = []
+                self._render_plans()
+                self._discard_plans_cache()
+                self._log(f"预览缓存已作废：{reason}。请重新分析选中。")
+                self.status_var.set("缓存已作废，请重新分析")
         elif kind == "qr_token":
             dialog, token, image = payload
             if dialog.winfo_exists():
@@ -1014,6 +1042,8 @@ class App(tk.Tk):
         self._log(f"已切换到本地模式：{client.root}；"
                   "只重命名本机文件，不会修改 115 网盘。"
                   "分析时仍会联网查询豆瓣/Bangumi/IMDb/TMDB。")
+        if self._restore_plans():
+            return True
         self.refresh()
         return True
 
@@ -1051,6 +1081,156 @@ class App(tk.Tk):
         if self.is_demo:
             return "demo"
         return "cloud"
+
+    # ------------------------------------------------------------ 预览缓存
+    def _plans_cache_path(self) -> str:
+        return os.path.join(self.data_dir, "plans_cache.pkl")
+
+    def _current_scope(self) -> tuple[str, str]:
+        """当前数据来源的指纹：模式 + 账号/路径，防止把 A 网盘的预览
+        恢复到 B 网盘或另一个本地目录上。"""
+        if self.is_local and self.local_client is not None:
+            return "local", os.path.normcase(
+                os.path.abspath(self.local_client.root))
+        if self.is_demo:
+            return "demo", "demo"
+        uid = ""
+        if self.cloud_client is not None:
+            try:
+                uid = str((self.cloud_client.cookie_dict() or {}).get("UID")
+                          or "")
+            except Exception:
+                uid = ""
+        return "cloud", uid
+
+    def _signature_of(self, plans: list[PlanItem]) -> str:
+        """文件清单指纹：任何一项被改名/增删，指纹都会变化。"""
+        rows = sorted(
+            f"{getattr(p.item, 'fid', '')}\x1f{p.item.name}"
+            for p in plans if getattr(p, "item", None) is not None)
+        return hashlib.sha1("\n".join(rows).encode("utf-8")).hexdigest()
+
+    def _save_plans_cache(self) -> None:
+        """把当前等待列表写到 data/plans_cache.pkl（本机数据，不联网）。"""
+        if not self.settings.get("remember_plans", True):
+            self._discard_plans_cache()
+            return
+        p = self._plans_cache_path()
+        if not self.plans or self.is_demo:
+            try:
+                if os.path.exists(p):
+                    os.remove(p)
+            except Exception:
+                pass
+            self._plans_saved_stamp = None
+            return
+        mode, root_id = self._current_scope()
+        payload = {
+            "version": 1,
+            "stamp": time.time(),
+            "mode": mode,
+            "root_id": root_id,
+            "paths": list(self.path_stack),
+            "current_cid": self.current_cid,
+            "signature": self._signature_of(self.plans),
+            "plans": self.plans,
+        }
+        tmp = p + ".tmp"
+        try:
+            with open(tmp, "wb") as f:
+                pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
+            os.replace(tmp, p)
+            self._plans_saved_stamp = payload["stamp"]
+        except Exception as e:
+            self._log(f"保存预览缓存失败：{e}")
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except Exception:
+                pass
+
+    def _load_plans_cache(self) -> dict | None:
+        p = self._plans_cache_path()
+        if not os.path.exists(p):
+            return None
+        try:
+            with open(p, "rb") as f:
+                data = pickle.load(f)
+        except Exception:
+            return None
+        if not isinstance(data, dict) or data.get("version") != 1:
+            return None
+        plans = data.get("plans")
+        if not isinstance(plans, list) or not plans:
+            return None
+        return data
+
+    def _restore_plans(self) -> bool:
+        """启动/切回时尝试恢复上次的等待列表。
+
+        前提：账号或根目录一致；恢复后仍会在后台逐项核对文件是否还在、
+        名字是否没变，任何一项对不上就整批丢弃，绝不在过期数据上改名。
+        """
+        if self.busy or not self.settings.get("remember_plans", True):
+            return False
+        data = self._load_plans_cache()
+        if data is None:
+            return False
+        mode, root_id = self._current_scope()
+        if data.get("mode") != mode or data.get("root_id") != root_id:
+            return False
+        plans = data["plans"]
+        if data.get("signature") != self._signature_of(plans):
+            return False
+        self.plans = plans
+        self._render_plans()
+        self._log(f"已恢复上次的 {len(plans)} 个等待任务（本机缓存，"
+                  "正在核对文件是否仍在原处…）")
+        self._set_busy(True)
+        client = self.client
+        self.run_async(lambda: self._verify_plans(client),
+                       "plans_verified", determinate=True)
+        return True
+
+    def _verify_plans(self, client) -> tuple[bool, str]:
+        """逐项确认缓存中的文件仍在原目录、名字未变。"""
+        cache: dict[str, list[P115Item]] = {}
+        for p in self.plans:
+            parent = str(getattr(p.item, "parent_id", "") or "")
+            if parent not in cache:
+                try:
+                    cache[parent] = client.list_dir(parent)
+                except Exception as e:
+                    return False, f"无法读取目录（{parent}）：{e}"
+            names = {it.name for it in cache[parent]}
+            for op in (p.ops or []):
+                if op.old_name not in names:
+                    return False, f"「{op.old_name}」已不在原文件夹（可能已被改名）"
+        return True, ""
+
+    def _discard_plans_cache(self) -> None:
+        """改名/撤销/切换数据源后，旧预览必须作废，避免下次误恢复。"""
+        p = self._plans_cache_path()
+        try:
+            if os.path.exists(p):
+                os.remove(p)
+        except Exception:
+            pass
+        self._plans_saved_stamp = None
+
+    def forget_plans(self) -> None:
+        """手动清空等待列表与缓存。"""
+        if not self.plans:
+            messagebox.showinfo(APP_TITLE, "当前没有等待中的任务。", parent=self)
+            return
+        if not messagebox.askyesno(APP_TITLE, "清空当前等待列表？\n"
+                                   "不会修改网盘/本地文件，重新分析即可恢复。",
+                                   parent=self):
+            return
+        self.plans = []
+        self._render_plans()
+        self._discard_plans_cache()
+        self._log("已清空等待列表。")
 
     # ------------------------------------------------------------ 自动更新
     def _schedule_update_check(self, delay_ms: int) -> None:
@@ -1540,11 +1720,21 @@ class App(tk.Tk):
             return
         planner = self.planner
         client = self.client
+        trace_lines: list[str] = []
+
+        def trace_plan(p: PlanItem) -> None:
+            mt = str(getattr(p.match, "trace", "") or "")
+            if not mt:
+                return
+            line = f"[搜索诊断] {p.item.name}：{mt}"
+            trace_lines.append(line)
+            self.post("log", line)
 
         def task():
             plans = planner.analyze(
                 client, roots,
-                progress=lambda a, b, m: self.post("progress", (a, b, m)))
+                progress=lambda a, b, m: self.post("progress", (a, b, m)),
+                trace=trace_plan)
             return plans
 
         self.run_async(task, "plans", determinate=True)
@@ -2198,6 +2388,7 @@ class App(tk.Tk):
             return
         self.plans = [x for x in self.plans if x is not p]
         self._render_plans()
+        self._save_plans_cache()
         self._log(f"已从等待列表移除：{p.title or p.current_name}")
 
     def clear_plans(self) -> None:
@@ -2211,7 +2402,29 @@ class App(tk.Tk):
             return
         self.plans = []
         self._render_plans()
+        self._discard_plans_cache()
         self._log("已清空等待列表（未修改网盘）。")
+
+    def restore_plans_manual(self) -> None:
+        """右键菜单：不重新分析，直接恢复上次保存的等待列表。"""
+        if self.busy:
+            messagebox.showinfo(APP_TITLE, "当前有任务在执行，请稍候。",
+                                parent=self)
+            return
+        if self.plans and not messagebox.askyesno(
+                APP_TITLE, "当前已有等待列表。\n用上次保存的结果替换它？",
+                parent=self):
+            return
+        if not self.settings.get("remember_plans", True):
+            messagebox.showinfo(
+                APP_TITLE, "设置里关闭了“记住上次分析结果”，无法恢复。",
+                parent=self)
+            return
+        if not self._restore_plans():
+            messagebox.showinfo(
+                APP_TITLE,
+                "没有可用的上次分析结果。\n可能是刚改过名、撤回过，"
+                "或者换过账号/文件夹。请重新分析。", parent=self)
 
     def rebuild_detail(self) -> None:
         p = self.detail_plan
@@ -2990,6 +3203,7 @@ class App(tk.Tk):
             messagebox.showinfo(APP_TITLE, text, parent=self)
         self.plans = []
         self._render_plans()
+        self._discard_plans_cache()
         self.refresh()
 
     def undo_last(self) -> None:
@@ -3017,6 +3231,7 @@ class App(tk.Tk):
         self._set_busy(False)
         ok = sum(1 for r in results if r.ok)
         self._log(f"撤销结果：成功 {ok} 个。")
+        self._discard_plans_cache()
         self.refresh()
 
     # ------------------------------------------------------------ 登录
@@ -3658,6 +3873,8 @@ class SettingsDialog(tk.Toplevel):
             "use_bangumi": tk.BooleanVar(value=bool(s.get("use_bangumi", True))),
             "auto_check_updates": tk.BooleanVar(
                 value=bool(s.get("auto_check_updates", True))),
+            "remember_plans": tk.BooleanVar(
+                value=bool(s.get("remember_plans", True))),
         }
         frame = ttk.Frame(self, padding=14)
         frame.pack(fill="both", expand=True)
@@ -3700,6 +3917,10 @@ class SettingsDialog(tk.Toplevel):
             frame,
             text="启动和运行中自动检查更新（只访问 GitHub，失败不打扰）",
             variable=self.vars["auto_check_updates"]).pack(anchor="w", pady=3)
+        ttk.Checkbutton(
+            frame,
+            text="记住上次分析结果（重启后直接恢复等待列表，自动核对文件）",
+            variable=self.vars["remember_plans"]).pack(anchor="w", pady=3)
         nfo_row = ttk.Frame(frame)
         nfo_row.pack(anchor="w", pady=3)
         ttk.Label(nfo_row, text="已有 NFO/图片").pack(side="left")
@@ -3769,6 +3990,7 @@ class SettingsDialog(tk.Toplevel):
             "use_bangumi": bool(self.vars["use_bangumi"].get()),
             "auto_check_updates": bool(
                 self.vars["auto_check_updates"].get()),
+            "remember_plans": bool(self.vars["remember_plans"].get()),
             "imdb_id_style": self.style_var.get(),
             "id_provider": self.provider_var.get(),
             "jp_folder_style": JP_LABEL_TO_KEY.get(

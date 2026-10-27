@@ -72,6 +72,9 @@ class ParsedName:
     # 自动搜索仍按目录锚点走，但匹配结果会先被要求同时支持这些标题，
     # 否则任务标记“需确认”，不再无脑改名。
     conflict_titles: list[str] = field(default_factory=list)
+    # 上下文整理时从视频文件名里收集到的季号（例如目录里没写 Sxx，
+    # 但文件名是 S2E01），供剧集任务在目录名缺季号时补用。
+    file_season: Optional[int] = None
 
     @property
     def season_episode(self) -> str:
@@ -123,6 +126,9 @@ class MatchResult:
     is_season_entry: bool = False
     country: str = ""           # jp / cn / ""（用于判断是否日番）
     animation: bool = False     # 国产内容是否动画（决定显示“国产动画”还是“电视剧”）
+    # 自动搜索的诊断摘要：用了哪些搜索词、各来源第一名、置信度。
+    # 显示在任务备注里，方便对照日志排查“为什么匹配成另一部片”。
+    trace: str = ""
 
     @property
     def display_title(self) -> str:

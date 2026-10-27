@@ -64,15 +64,18 @@ def main():
             "[BD-REMUX]女子落语"):
         plans = plans_for(folder, episodes + [ova])
         series = [p for p in plans if p.media_type == "series"]
-        movies = [p for p in plans if p.media_type == "movie"]
         assert len(series) == 1, (folder, [(p.item.name, p.media_type)
                                           for p in plans])
         p = series[0]
         assert p.item.is_dir, (folder, p.item.name)
         assert p.rename_root, (folder, p.rename_root)
         assert any(op.is_dir and op.old_name == folder for op in p.ops), p.ops
-        assert sum(1 for op in p.ops if not op.is_dir) >= 13, p.ops
-        assert len(movies) == 1 and movies[0].item.name == ova, movies
+        # OVA 现在按特别篇规则映射成 S00Exx（不再混进正片集数），
+        # 所以正片 13 集 + 特别篇 1 集 = 14 个文件改名操作。
+        assert any(op.old_name == ova and op.role == "episode"
+                   for op in p.ops), p.ops
+        assert sum(1 for op in p.ops if not op.is_dir) == 14, p.ops
+        assert p.seasons and 0 in p.seasons, p.seasons
 
     # 真正的多剧合集（两个不同剧名）不能把合集目录改成其中一部
     folder = "[BD-REMUX]某合集"
