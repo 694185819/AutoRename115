@@ -8,7 +8,8 @@ from app.episode_versions import analyze_episode_versions
 from app.models import MatchResult, P115Item
 from app.nfo import _episode_title
 from app.parser import parse_name
-from app.planner import NamingOptions, Planner, _episode_name
+from app.planner import (FileEntry, NamingOptions, Planner,
+                        _dotted_episode_name, _episode_name)
 
 
 class Entry:
@@ -102,6 +103,33 @@ def main():
         "测试番 S01E01v2.副标题 [1080p WEB-DL].mkv"
     assert _episode_title(
         "测试剧.Test.Show.S01E01v2.副标题 [1080p WEB-DL].mkv", 1) == "副标题"
+
+    # 长副标题不能被固定的 80 字节上限截断；总长度才决定是否省略
+    long_sub = "楽屋の富 / 三塔起請 / 風邪娘（后台财富 / 三塔损一两 / 感冒少女）"
+    jp_name = _episode_name("じょしらく", 1, 2, None, ".m2ts", "", long_sub)
+    assert "感冒少女" in jp_name, jp_name
+    assert jp_name.endswith(".m2ts"), jp_name
+    assert len(jp_name.encode("utf-8")) <= 235, jp_name
+    tv_name = _dotted_episode_name(
+        "女子落语", "Joshiraku", 1, 2, None, long_sub,
+        "1080p WEB-DL", ".mkv")
+    assert "感冒少女" in tv_name, tv_name
+    assert tv_name.endswith(".mkv"), tv_name
+    assert len(tv_name.encode("utf-8")) <= 235, tv_name
+
+    # 结尾是“真田小ZOO）”这类含大写字母/括号的副标题，不能被当成发布组删掉
+    raw = ("じょしらく S01E03.無情澡堂 / 淺草參拜 / 真田小ZOO"
+           "（无情澡堂 / 浅草参拜 / 真田小ZOO）.m2ts")
+    entry = FileEntry(
+        item=P115Item(fid="sub", parent_id="show", name=raw, is_dir=False),
+        parsed=parse_name(raw))
+    sub = Planner(None)._episode_subtitle(entry)
+    assert sub.endswith("真田小ZOO）"), sub
+    group_entry = FileEntry(
+        item=P115Item(fid="group", parent_id="show",
+                      name="Show.S01E01.Subtitle GROUP.mkv", is_dir=False),
+        parsed=parse_name("Show.S01E01.Subtitle GROUP.mkv"))
+    assert Planner(None)._episode_subtitle(group_entry) == "Subtitle"
 
     # 7) Planner 集成：多版本保持自动；出现疑似重复后降级需确认且不勾选
     root = P115Item(fid="show", parent_id="tv", name="测试剧",

@@ -214,6 +214,34 @@ def _is_meaningless_title(title: str) -> bool:
     return False
 
 
+def _fit_name_parts(head: str, subtitle: str, fixed_bytes: int,
+                    limit: int = 235, min_head: int = 20) -> tuple[str, str]:
+    """在总字节预算内优先保留完整副标题，再截长标题。
+
+    fixed_bytes 不包含 head、副标题，以及 head 与副标题之间的一个点。
+    """
+    head = str(head or "")
+    subtitle = str(subtitle or "")
+
+    def total(h: str, s: str) -> int:
+        return (fixed_bytes + len(h.encode("utf-8")) +
+                len(s.encode("utf-8")) + (1 if s else 0))
+
+    if total(head, subtitle) <= limit:
+        return head, subtitle
+    if subtitle:
+        room_head = limit - fixed_bytes - \
+            len(subtitle.encode("utf-8")) - 1
+        if room_head >= min_head:
+            return _truncate_utf8(head, room_head), subtitle
+        head = _truncate_utf8(head, min_head)
+        room_sub = max(0, limit - fixed_bytes -
+                       len(head.encode("utf-8")) - 1)
+        return head, _truncate_utf8(subtitle, room_sub)
+    return _truncate_utf8(
+        head, max(min_head, limit - fixed_bytes)), ""
+
+
 def _episode_name(title: str, season: int, ep: int, ep_end: Optional[int],
                   ext: str, specs: str, subtitle: str = "",
                   version: str = "") -> str:
@@ -221,14 +249,16 @@ def _episode_name(title: str, season: int, ep: int, ep_end: Optional[int],
     if ep_end and ep_end != ep:
         ep_part += f"-E{ep_end:02d}"
     ep_part += version
-    sub = sanitize_name(subtitle, 80) if subtitle else ""
-    sub_part = f".{sub}" if sub else ""
     spec_part = f" [{specs}]" if specs else ""
-    # 先给 SxxExx/副标题/规格留出空间，长日文标题只截标题，不截集数
-    tail = ep_part + sub_part + spec_part
-    room = 235 - len(ext.encode("utf-8")) - len(tail.encode("utf-8"))
-    title = _truncate_utf8(title, max(20, room))
-    return title + tail + ext
+    fixed = (len(ext.encode("utf-8")) +
+             len(ep_part.encode("utf-8")) +
+             len(spec_part.encode("utf-8")))
+    title, sub = _fit_name_parts(
+        sanitize_name(title, 235),
+        sanitize_name(subtitle, 235) if subtitle else "",
+        fixed)
+    sub_part = f".{sub}" if sub else ""
+    return title + ep_part + sub_part + spec_part + ext
 
 
 RE_SPEC_TOKEN = re.compile(
@@ -258,20 +288,23 @@ def _dotted_episode_name(cn: str, en: str, season: int, ep: int,
     if ep_end and ep_end != ep:
         ep_part += f"-E{ep_end:02d}"
     ep_part += version
-    cn = _dot_segment(cn, 120, colon_to_dot=False)
-    en = _dot_segment(en, 120) if en else ""
-    sub = _dot_segment(subtitle, 80) if subtitle else ""
+    cn = _dot_segment(cn, 235, colon_to_dot=False)
+    en = _dot_segment(en, 235) if en else ""
+    sub = _dot_segment(subtitle, 235) if subtitle else ""
     if en and norm_title(en) == norm_title(cn):
         en = ""
-    tail_parts = [ep_part]
-    if sub:
-        tail_parts.append(sub)
-    tail = "." + ".".join(tail_parts)
-    if specs:
-        tail += f" [{specs}]"
-    room = 235 - len(ext.encode("utf-8")) - len(tail.encode("utf-8"))
     head = ".".join(p for p in (cn, en) if p)
-    head = _truncate_utf8(head, max(20, room)).rstrip(" .-_")
+    spec_part = f" [{specs}]" if specs else ""
+    # “.SxxExx”和规格/扩展名固定保留，标题与副标题共享剩余空间。
+    fixed = (len(ext.encode("utf-8")) + 1 +
+             len(ep_part.encode("utf-8")) +
+             len(spec_part.encode("utf-8")))
+    head, sub = _fit_name_parts(head, sub, fixed)
+    head = head.rstrip(" .-_")
+    tail = "." + ep_part
+    if sub:
+        tail += "." + sub
+    tail += spec_part
     return (head + tail + ext) if head else (tail.lstrip(".") + ext)
 
 
@@ -2368,7 +2401,8 @@ class Planner:
             out.append(tok)
             if len(out) >= 24:
                 break
-        if out and out[-1].isupper() and len(out[-1]) <= 12:
+        if out and out[-1].isupper() and len(out[-1]) <= 12 and \
+                not re.search(r"[㐀-鿿぀-ヿ()[\]{}（）【】]", out[-1]):
             out.pop()
         if out and len(out) <= 2 and all(t.isupper() for t in out):
             return ""
