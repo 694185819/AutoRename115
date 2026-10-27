@@ -1,0 +1,29 @@
+# 本地登录凭据、设置、缓存和撤销记录（绝不能上传）
+data/
+work/dist_data_backup*/
+work/metadata_cache.json
+cookies.json
+error.log
+undo.json
+
+# Python / 构建产物
+.venv/
+__pycache__/
+*.py[cod]
+build/
+dist/
+AutoRename115-portable.zip
+
+# 本地截图、临时探针和联网调试脚本
+work/*.png
+work/tests/debug_*.py
+work/tests/_probe_*.py
+work/tests/_check_*.py
+work/tests/_tmp_*.py
+work/tests/inspect_*.py
+work/tests/show_demo.py
+work/tests/test_metadata.py
+work/tests/test_gui_real_listing.py
+work/tests/test_dotted_naming.py
+work/pack_portable.py
+SHA256.txt
