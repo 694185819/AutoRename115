@@ -35,11 +35,13 @@ def main():
     assert updater.version_key("0.1.0") == (0, 1, 0, 0)
     assert updater.version_key("0.11") == (0, 11, 0, 0)
     assert updater.version_key("0.12") == (0, 12, 0, 0)
+    assert updater.version_key("0.13") == (0, 13, 0, 0)
     assert not updater.is_newer("v0.1", "0.1")
     assert not updater.is_newer("v0.1.0", "0.1")
     assert updater.is_newer("v0.2", "0.1")
     assert updater.is_newer("v0.11", "0.1")
     assert updater.is_newer("v0.12", "0.11")
+    assert updater.is_newer("v0.13", "0.12")
 
     old_get = updater.requests.get
     try:

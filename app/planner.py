@@ -1149,10 +1149,54 @@ class Planner:
                 key = norm_title(e.parsed.title) or \
                     norm_title(strip_season_markers(folder_title)) or "unknown"
                 groups.setdefault(key, []).append(e)
-            for group in groups.values():
+            # 目录名是中文、文件里写日文别名时（例如
+            # “女子落语 [じょしらく]”里的“じょしらく S01E01”），
+            # 不能因为中文字面不同就把整个目录当成合集。只要有一组
+            # 集数文件能和目录的中文名/别名对上，这一组仍然代表
+            # 当前剧集目录，文件夹要参与改名；OVA/其他组继续单独列出。
+            folder_anchors = [folder_title] + [
+                q for q in folder_parsed.queries
+                if _usable_query(q)]
+            folder_anchors = list(dict.fromkeys(
+                a for a in folder_anchors if a))
+
+            def same_as_folder(text: str) -> bool:
+                nt = norm_title(text)
+                if not nt:
+                    return False
+                for anchor in folder_anchors:
+                    na = norm_title(anchor)
+                    if na and (nt == na or titles_agree(text, anchor)):
+                        return True
+                return False
+
+            root_group = ""
+            for key, group in groups.items():
+                if same_as_folder(key) and any(
+                        e.parsed.episode is not None for e in group):
+                    root_group = key
+                    break
+            if not root_group and not generic and \
+                    not is_season_dir(mr.item.name) and \
+                    not is_part_dir(mr.item.name):
+                # 目录没有写日文别名时，中文目录名和日文文件名也可能
+                # 只是翻译关系。这里只有一个成组的集数标题（其余是
+                # OVA/花絮），就把这一组当作当前剧集，文件夹正常改名。
+                episodic_groups = [
+                    (key, group) for key, group in groups.items()
+                    if any(e.parsed.episode is not None for e in group)]
+                if len(episodic_groups) == 1:
+                    key, group = episodic_groups[0]
+                    if sum(1 for e in group
+                           if e.parsed.episode is not None) >= 2:
+                        root_group = key
+            for key, group in groups.items():
                 if any(e.parsed.episode is not None for e in group):
-                    p = self._series_plan(client, mr, group, folder_parsed,
-                                          rename_root=False, is_container=True)
+                    rename_root = key == root_group
+                    p = self._series_plan(
+                        client, mr, group, folder_parsed,
+                        rename_root=rename_root,
+                        is_container=not rename_root)
                 else:
                     if len(group) == 1:
                         p = self._movie_plan(client, mr, [group[0]],
@@ -1781,7 +1825,8 @@ class Planner:
                 match.tmdb_id = str(found["id"])
 
     def _online_series_title(self, match: MatchResult,
-                             year: Optional[int] = None) -> str:
+                             year: Optional[int] = None,
+                             parsed: Optional[ParsedName] = None) -> str:
         """强制使用联网结果里的主剧名，不拿本地文件名兜底。"""
         # 豆瓣/Bangumi 的中文季条目最可靠；TMDB 可能命中同名的另一部剧。
         values = []
@@ -1794,6 +1839,7 @@ class Planner:
         if match.tmdb and match.tmdb.title:
             values.append(match.tmdb.title)
         values.append(match.title_original)
+        cleaned: list[str] = []
         for raw in values:
             t = strip_season_and_subtitle(str(raw or "")).strip(
                 " ._-–—:：·")
@@ -1808,9 +1854,25 @@ class Planner:
                     t = m.group(1).strip(" ._-–—:：·")
             if year:
                 t = _strip_trailing_year(t, year)
-            if t:
-                return strip_season_markers(t)
-        return ""
+            t = strip_season_markers(t).strip(" ._-–—:：·")
+            if t and t not in cleaned:
+                cleaned.append(t)
+        # 本地目录名就是“葬送的芙莉莲”时，不能被 Bangumi 搜索返回的
+        # 同名番外“葬送的芙莉莲 ~●●的魔法~”抢走主剧名。优先选和本地
+        # 主标题（去掉季号后）完全一致的候选。
+        anchor = norm_title(strip_season_markers(
+            (parsed.title if parsed else "") or ""))
+        if anchor:
+            exact = [t for t in cleaned if norm_title(t) == anchor]
+            # 目录是英文名、联网主剧名是中文时，仍优先用中文主剧名
+            # （英文名由 _english_title 单独补），不要让英文原名把
+            # “降世神通：最后的气宗”挤成 Avatar: The Last Airbender。
+            cjk_exact = [t for t in exact if re.search(r"[㐀-鿿]", t)]
+            if cjk_exact:
+                return cjk_exact[0]
+            if exact and not any(re.search(r"[㐀-鿿]", t) for t in cleaned):
+                return exact[0]
+        return cleaned[0] if cleaned else ""
 
     # ------------------------------------------------------------ 剧集
     def _tmdb_season_counts(self, plan: PlanItem) -> dict[int, int]:
@@ -1999,7 +2061,7 @@ class Planner:
         category = self._detect_category("series", match, parsed, context_text)
 
         year = (match.series_year or match.year or parsed.year)
-        title = self._online_series_title(match, year)
+        title = self._online_series_title(match, year, parsed=parsed)
         if not title:
             p = PlanItem(item=mr.item, media_type="series", parsed=parsed,
                          match=match)

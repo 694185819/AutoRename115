@@ -1697,7 +1697,12 @@ class MetadataClient:
                 if exact:
                     c.score = min(1.0, c.score + 0.02)
                 good.append(c)
-        return max(good, key=lambda c: (
+        # 和主来源一样：有精确同名/别名条目时，不让模糊近似条目
+        # 仅凭年份或轻微更高的相似分抢走 IMDb ID。
+        exact_good = [c for c in good
+                      if isinstance(c.extra, dict) and c.extra.get("imdb_exact")]
+        pool = exact_good or good
+        return max(pool, key=lambda c: (
             c.score, c.extra.get("imdb_exact", 0), -c.rank), default=None)
 
     # ------------------------------------------------------------ 主剧名
@@ -1962,8 +1967,13 @@ class MetadataClient:
             douban_all = [c for c in douban_all if anchor_ok(c)]
             tmdb_all = [c for c in tmdb_all if anchor_ok(c)]
             if dropped:
-                shown = "、".join(_dedupe_str(dropped)[:3])
-                res.notes.append(f"已忽略标题与本地不一致的候选：{shown}")
+                shown = "、".join(_dedupe_str(dropped)[:6])
+                # 这些是搜索接口顺带返回的模糊结果，已被锚点校验淘汰；
+                # 详情只写运行日志，避免预览里看起来像是采用了它们。
+                self.log(f"自动匹配已过滤无关候选（未采用）：{shown}")
+                res.notes.append(
+                    "已忽略标题与本地不一致的候选"
+                    f"（{len(_dedupe_str(dropped))} 个，未采用）。")
 
         # 电影年份是最强的消歧信息：有正确年份的候选时，先排除年份差
         # 超过 1 年的同名条目（Jellyfin TMDB 搜索也采用类似过滤）。
