@@ -2,6 +2,7 @@
 """Tkinter 界面：登录 115、浏览目录、分析、预览、应用、撤销。"""
 from __future__ import annotations
 
+import base64
 import copy
 import io
 import json
@@ -17,7 +18,7 @@ from tkinter import messagebox, ttk
 
 from PIL import Image, ImageTk
 
-from . import nfo, updater
+from . import nfo, qq_channel, updater
 from .episode_mapping import EpisodeMappingDialog
 from .manual_search import SOURCE_LABELS, ManualSearchDialog
 from .metadata import (MetadataClient, cn_season_number, norm_title,
@@ -2910,7 +2911,7 @@ class AboutDialog(tk.Toplevel):
         self.title("关于 AutoRename115")
         self.resizable(False, False)
         self.transient(app)
-        app._center_window(self, 620, 430, parent=app)
+        app._center_window(self, 620, 470, parent=app)
         self.grab_set()
         self.protocol("WM_DELETE_WINDOW", self.destroy)
 
@@ -2933,6 +2934,21 @@ class AboutDialog(tk.Toplevel):
         self.repo_link.bind("<Return>", self._open_repo)
         self.repo_link.bind("<space>", self._open_repo)
         self.repo_link.configure(takefocus=True)
+        qq_row = ttk.Frame(frame)
+        qq_row.pack(anchor="w", pady=(0, 10))
+        ttk.Label(qq_row, text="QQ 频道：").pack(side="left")
+        self.qq_link = ttk.Label(
+            qq_row, text=qq_channel.QQ_CHANNEL_NAME, foreground="#0563c1",
+            cursor="hand2", font=("Microsoft YaHei UI", 9, "underline"))
+        self.qq_link.pack(side="left")
+        self.qq_link.bind("<Button-1>", self._open_qq)
+        self.qq_link.bind("<Return>", self._open_qq)
+        self.qq_link.bind("<space>", self._open_qq)
+        self.qq_link.configure(takefocus=True)
+        ttk.Button(qq_row, text="二维码",
+                   command=self._show_qq_qr).pack(side="left", padx=(8, 4))
+        ttk.Button(qq_row, text="打开频道",
+                   command=self._open_qq).pack(side="left")
         ttk.Label(
             frame,
             text="在线更新：从 GitHub Release 下载便携包，退出后覆盖当前程序目录；"
@@ -2973,6 +2989,20 @@ class AboutDialog(tk.Toplevel):
             self.after(100, self._poll_events)
         except Exception:
             pass
+
+    def _open_qq(self, event=None) -> str:
+        try:
+            opened = webbrowser.open(qq_channel.QQ_CHANNEL_URL)
+        except Exception:
+            opened = False
+        if not opened:
+            messagebox.showinfo(
+                "QQ 频道", f"请手动打开：\n{qq_channel.QQ_CHANNEL_URL}",
+                parent=self)
+        return "break"
+
+    def _show_qq_qr(self) -> None:
+        QQChannelDialog(self.app)
 
     def _open_repo(self, event=None) -> str:
         try:
@@ -3104,6 +3134,62 @@ class AboutDialog(tk.Toplevel):
             parent=self)
         self.destroy()
         self.app.after(150, self.app.destroy)
+
+
+class QQChannelDialog(tk.Toplevel):
+    """按需显示 QQ 频道二维码，避免关于窗口一直占着大图。"""
+
+    def __init__(self, app: App):
+        super().__init__(app)
+        self.app = app
+        self.title("QQ 频道 · 115资源互助小据点")
+        self.resizable(False, False)
+        self.transient(app)
+        app._center_window(self, 420, 590, parent=app)
+        self.grab_set()
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+
+        frame = ttk.Frame(self, padding=16)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text=qq_channel.QQ_CHANNEL_NAME,
+                  font=("Microsoft YaHei UI", 13, "bold")).pack(anchor="center")
+        ttk.Label(frame, text=f"频道号：{qq_channel.QQ_CHANNEL_ID}",
+                  foreground="#777").pack(anchor="center", pady=(3, 8))
+        self.photo = None
+        try:
+            raw = base64.b64decode(qq_channel.QR_PNG_BASE64)
+            image = Image.open(io.BytesIO(raw)).convert("RGB")
+            image = image.resize((300, 300), Image.Resampling.NEAREST)
+            self.photo = ImageTk.PhotoImage(image)
+            ttk.Label(frame, image=self.photo, relief="solid",
+                      borderwidth=1).pack(pady=4)
+        except Exception:
+            ttk.Label(frame, text="二维码加载失败，请直接打开频道链接。",
+                      foreground="#b3261e", wraplength=360).pack(pady=20)
+        url_label = ttk.Label(
+            frame, text=qq_channel.QQ_CHANNEL_URL, foreground="#0563c1",
+            cursor="hand2", font=("Microsoft YaHei UI", 9, "underline"))
+        url_label.pack(anchor="center", pady=(8, 3))
+        url_label.bind("<Button-1>", self._open)
+        url_label.bind("<Return>", self._open)
+        url_label.bind("<space>", self._open)
+        ttk.Label(frame, text="用 QQ 扫码加入；二维码只在需要时打开。",
+                  foreground="#777").pack(anchor="center", pady=(4, 10))
+        btns = ttk.Frame(frame)
+        btns.pack(side="bottom", fill="x")
+        ttk.Button(btns, text="打开频道", command=self._open).pack(side="left")
+        ttk.Button(btns, text="关闭", command=self.destroy).pack(side="right")
+
+    def _open(self, event=None) -> str:
+        try:
+            opened = webbrowser.open(qq_channel.QQ_CHANNEL_URL)
+        except Exception:
+            opened = False
+        if not opened:
+            messagebox.showinfo(
+                "QQ 频道", f"请手动打开：\n{qq_channel.QQ_CHANNEL_URL}",
+                parent=self)
+        return "break"
 
 
 class SettingsDialog(tk.Toplevel):

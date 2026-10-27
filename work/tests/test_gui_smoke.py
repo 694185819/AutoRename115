@@ -4,8 +4,8 @@ import traceback
 
 sys.path.insert(0, r"I:\实验\AutoRename115")
 import app.gui as gui
-from app.gui import AboutDialog, App
-from app import updater
+from app.gui import AboutDialog, App, QQChannelDialog
+from app import qq_channel, updater
 
 warnings = []
 gui.messagebox.showwarning = lambda *a, **k: warnings.append(
@@ -76,7 +76,13 @@ about = AboutDialog(app)
 app.update()
 assert "0.1" in about.version_label.cget("text")
 assert updater.REPO_URL in about.repo_link.cget("text")
+assert qq_channel.QQ_CHANNEL_NAME in about.qq_link.cget("text")
 about.destroy()
+
+qq = QQChannelDialog(app)
+app.update()
+assert qq.photo is not None
+qq.destroy()
 
 app.after(2500, app.destroy)
 app.mainloop()
