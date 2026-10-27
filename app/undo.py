@@ -35,7 +35,8 @@ class UndoManager:
                       ensure_ascii=False, indent=1)
         os.replace(tmp, self.path)
 
-    def record(self, ops: list[RenameOp], results: list[RenameResult]) -> int:
+    def record(self, ops: list[RenameOp], results: list[RenameResult],
+               scope: str = "cloud") -> int:
         ok_ids = {r.fid for r in results if r.ok}
         done = [o for o in ops if o.fid in ok_ids]
         if not done:
@@ -43,6 +44,7 @@ class UndoManager:
         self.batches.append({
             "time": int(time.time()),
             "undone": False,
+            "scope": scope or "cloud",
             "ops": [{
                 "fid": o.fid, "old_name": o.old_name, "new_name": o.new_name,
                 "is_dir": o.is_dir, "parent_id": o.parent_id, "role": o.role,
@@ -51,11 +53,16 @@ class UndoManager:
         self._save()
         return len(self.batches) - 1
 
-    def last_undoable(self) -> Optional[tuple[int, dict]]:
+    def last_undoable(self, scope: Optional[str] = None
+                      ) -> Optional[tuple[int, dict]]:
         for i in range(len(self.batches) - 1, -1, -1):
             b = self.batches[i]
-            if not b.get("undone") and b.get("ops"):
-                return i, b
+            if b.get("undone") or not b.get("ops"):
+                continue
+            # 旧记录没有 scope，按 115 网盘处理；本地/演示记录互不串用。
+            if scope is not None and str(b.get("scope") or "cloud") != scope:
+                continue
+            return i, b
         return None
 
     def mark_undone(self, index: int) -> None:
@@ -63,9 +70,10 @@ class UndoManager:
             self.batches[index]["undone"] = True
             self._save()
 
-    def undo_last(self, client, log=None) -> list[RenameResult]:
+    def undo_last(self, client, log=None,
+                  scope: Optional[str] = None) -> list[RenameResult]:
         log = log or (lambda s: None)
-        found = self.last_undoable()
+        found = self.last_undoable(scope)
         if not found:
             log("没有可以撤销的重命名记录。")
             return []

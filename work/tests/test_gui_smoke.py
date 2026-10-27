@@ -74,15 +74,37 @@ assert app.progress_stage.cget("text") == ""
 # 关于窗口显示版本和仓库地址
 about = AboutDialog(app)
 app.update()
-assert "0.1" in about.version_label.cget("text")
+assert updater.APP_VERSION in about.version_label.cget("text")
 assert updater.REPO_URL in about.repo_link.cget("text")
 assert qq_channel.QQ_CHANNEL_NAME in about.qq_link.cget("text")
-about.destroy()
 
-qq = QQChannelDialog(app)
-app.update()
-assert qq.photo is not None
-qq.destroy()
+# 频道按钮优先唤起 QQ；QQ 不可用时才回退默认浏览器
+old_qq_open = qq_channel.open_in_qq
+old_browser_open = gui.webbrowser.open
+opened = []
+try:
+    qq_channel.open_in_qq = lambda: opened.append("qq") or True
+    gui.webbrowser.open = (
+        lambda url: opened.append(("browser", url)) or True)
+    about._open_qq()
+    assert opened == ["qq"], opened
+
+    qq = QQChannelDialog(app)
+    app.update()
+    assert qq.photo is not None
+    opened.clear()
+    qq._open()
+    assert opened == ["qq"], opened
+    qq.destroy()
+
+    opened.clear()
+    qq_channel.open_in_qq = lambda: False
+    about._open_qq()
+    assert opened == [("browser", qq_channel.QQ_CHANNEL_URL)], opened
+finally:
+    qq_channel.open_in_qq = old_qq_open
+    gui.webbrowser.open = old_browser_open
+about.destroy()
 
 app.after(2500, app.destroy)
 app.mainloop()

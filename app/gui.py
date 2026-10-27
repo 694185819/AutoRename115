@@ -14,12 +14,13 @@ import threading
 import time
 import tkinter as tk
 import webbrowser
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 
 from PIL import Image, ImageTk
 
 from . import nfo, qq_channel, updater
 from .episode_mapping import EpisodeMappingDialog
+from .local import LocalClient, is_valid_local_name
 from .manual_search import SOURCE_LABELS, ManualSearchDialog
 from .metadata import (MetadataClient, cn_season_number, norm_title,
                        strip_season_markers, titles_agree)
@@ -74,6 +75,7 @@ DEFAULT_SETTINGS = {
     "tmdb_key": "",
     "douban_delay": 2.2,
     "login_app": "ios",
+    "local_root": "",
     # 首次使用（还没有 Cookie）时显示 115 风控提醒；勾选“只显示一次”后
     # 这里变为 True，下次启动不再打扰。
     "risk_notice_dismissed": False,
@@ -132,7 +134,11 @@ class App(tk.Tk):
         self.start_demo = demo
         self.settings = self._load_settings()
         self.client = None
+        self.cloud_client = None
+        self.local_client: LocalClient | None = None
+        self.local_root = str(self.settings.get("local_root") or "")
         self.is_demo = False
+        self.is_local = False
         self.busy = False
         self.q: queue.Queue = queue.Queue()
         self.plans: list[PlanItem] = []
@@ -248,9 +254,14 @@ class App(tk.Tk):
         self.login_label.pack(side="left", padx=(12, 0))
         ttk.Button(top, text="设置", command=self.open_settings).pack(side="right", padx=3)
         ttk.Button(top, text="刷新", command=self.refresh).pack(side="right", padx=3)
-        ttk.Button(top, text="演示模式", command=self.enable_demo).pack(side="right", padx=3)
-        ttk.Button(top, text="导入 Cookie", command=self.open_cookie).pack(side="right", padx=3)
-        ttk.Button(top, text="登录 115", command=self.open_login).pack(side="right", padx=3)
+        self.demo_btn = ttk.Button(top, text="演示模式", command=self.enable_demo)
+        self.demo_btn.pack(side="right", padx=3)
+        self.cookie_btn = ttk.Button(top, text="导入 Cookie",
+                                     command=self.open_cookie)
+        self.cookie_btn.pack(side="right", padx=3)
+        self.login_btn = ttk.Button(top, text="登录 115",
+                                    command=self.open_login)
+        self.login_btn.pack(side="right", padx=3)
 
         # 主体
         paned = ttk.Panedwindow(self, orient="horizontal")
@@ -260,6 +271,30 @@ class App(tk.Tk):
         # 左侧目录：和右侧任务表紧挨着，只留一条细分隔线
         left = ttk.Frame(paned)
         paned.add(left, weight=2)
+
+        # 文件来源：网盘 / 本地文件夹。放在文件列表正上方。
+        mode_bar = ttk.Frame(left)
+        mode_bar.pack(fill="x", pady=(0, 3))
+        ttk.Label(mode_bar, text="文件来源：").pack(side="left")
+        self.mode_var = tk.StringVar(value="cloud")
+        self.cloud_mode_btn = ttk.Radiobutton(
+            mode_bar, text="网盘模式", value="cloud",
+            variable=self.mode_var,
+            command=lambda: self._switch_mode("cloud"))
+        self.cloud_mode_btn.pack(side="left")
+        self.local_mode_btn = ttk.Radiobutton(
+            mode_bar, text="本地模式", value="local",
+            variable=self.mode_var,
+            command=lambda: self._switch_mode("local"))
+        self.local_mode_btn.pack(side="left", padx=(4, 0))
+        self.choose_local_btn = ttk.Button(
+            mode_bar, text="选择文件夹…", command=self.choose_local_root,
+            state="disabled")
+        self.choose_local_btn.pack(side="left", padx=(8, 4))
+        self.local_root_label = ttk.Label(
+            mode_bar, text="", foreground="#777", anchor="w")
+        self.local_root_label.pack(side="left", fill="x", expand=True)
+
         nav = ttk.Frame(left)
         nav.pack(fill="x", pady=(0, 4))
         ttk.Button(nav, text="上一级", width=7, command=self.go_up).pack(side="left")
@@ -534,6 +569,7 @@ class App(tk.Tk):
         self.status_var = tk.StringVar(value="就绪")
         ttk.Label(status, textvariable=self.status_var).pack(side="left")
         self.after(300, self._set_sash)
+        self._refresh_mode_controls()
 
     def _set_sash(self) -> None:
         # 左栏默认拉宽一些；两栏之间只用 Panedwindow 自带的细分隔条
@@ -629,6 +665,10 @@ class App(tk.Tk):
             self.status_var.set(f"已加载 {len(items)} 项")
         elif kind == "login_check":
             self._set_busy(False)
+            # 用户可能在登录检查返回前就切到本地/演示模式，不能把
+            # “已登录”状态和刷新动作带到本地目录上。
+            if self.is_local or self.is_demo:
+                return
             if payload:
                 self._set_login_status("已登录", "#176b33")
                 self.refresh()
@@ -702,7 +742,8 @@ class App(tk.Tk):
         elif kind == "nfo_save":
             self._set_busy(False)
             s = payload
-            msg = (f"NFO/图片保存完成：上传 {s['uploads']}，"
+            action = "写入本地" if s.get("local") else "上传"
+            msg = (f"NFO/图片保存完成：{action} {s['uploads']}，"
                    f"改名 {s['renames']}，删除 {s['deleted']}，"
                    f"跳过 {s['skipped']}。")
             self._log(msg)
@@ -791,10 +832,11 @@ class App(tk.Tk):
         if self.start_demo:
             self.enable_demo()
             return
-        if self.is_demo:
+        if self.is_demo or self.is_local:
             return
-        self.client = P115Client(self.data_dir, log=self.log_threadsafe)
-        if self.client.cookie_dict():
+        self.cloud_client = P115Client(self.data_dir, log=self.log_threadsafe)
+        self.client = self.cloud_client
+        if self.cloud_client.cookie_dict():
             self._set_login_status("检查登录…", "#888")
             self.run_async(lambda: self.client.is_logged_in(force=True),
                            "login_check")
@@ -805,10 +847,177 @@ class App(tk.Tk):
 
     def _open_login_after_notice(self) -> None:
         """首次使用（还没有 Cookie）先提醒风控，再打开扫码窗口。"""
+        if self.is_local or self.is_demo:
+            return
         if not self.settings.get("risk_notice_dismissed", False):
             dlg = RiskNoticeDialog(self)
             self.wait_window(dlg)
         self.open_login()
+
+    # ------------------------------------------------------------ 文件来源
+    def _refresh_mode_controls(self) -> None:
+        if self.is_local:
+            mode = "local"
+        elif self.is_demo:
+            mode = "demo"
+        else:
+            mode = "cloud"
+        self.mode_var.set(mode)
+        self.choose_local_btn.configure(
+            state="normal" if self.is_local else "disabled")
+        local_name = ""
+        if self.is_local and self.local_root:
+            local_name = (os.path.basename(self.local_root.rstrip("\\/"))
+                          or self.local_root)
+        self.local_root_label.configure(text=local_name)
+        # 本地模式不碰 115，把网盘登录入口灰掉，避免误以为在改网盘。
+        cloud_state = "disabled" if self.is_local else "normal"
+        self.login_btn.configure(state=cloud_state)
+        self.cookie_btn.configure(state=cloud_state)
+        self.demo_btn.configure(state=cloud_state)
+        if hasattr(self, "nfo_mode_label"):
+            self.nfo_mode_label.configure(text=self._nfo_mode_text())
+
+    def _discard_plans_for_switch(self) -> bool:
+        if not self.plans:
+            return True
+        return messagebox.askyesno(
+            APP_TITLE,
+            "切换文件来源会清空“等待处理的任务”（只清界面，不会修改"
+            "网盘或本地文件）。\n\n继续切换吗？",
+            parent=self)
+
+    def _clear_dir_tree(self) -> None:
+        self.dir_tree.delete(*self.dir_tree.get_children())
+        self.dir_items.clear()
+        self._dir_menu_item = None
+        self._pending_dir_select = None
+        self.dir_sel_label.configure(text="")
+        self.path_label.configure(
+            text=" / ".join(name for _, name in self.path_stack))
+
+    def _switch_mode(self, mode: str, check_login: bool = True) -> bool:
+        if mode == "local":
+            if self.is_local:
+                return True
+            if self.busy:
+                self._refresh_mode_controls()
+                return False
+            root = self.local_root
+            if not root or not os.path.isdir(root):
+                root = filedialog.askdirectory(
+                    title="选择本地媒体文件夹", parent=self,
+                    initialdir=root if root and os.path.isdir(root) else
+                    os.path.expanduser("~"))
+                if not root:
+                    self._refresh_mode_controls()
+                    return False
+            if not self._discard_plans_for_switch():
+                self._refresh_mode_controls()
+                return False
+            return self._enter_local(root)
+
+        if mode == "cloud":
+            if not self.is_local and not self.is_demo:
+                self._refresh_mode_controls()
+                return True
+            if self.busy:
+                self._refresh_mode_controls()
+                return False
+            if not self._discard_plans_for_switch():
+                self._refresh_mode_controls()
+                return False
+            self._enter_cloud(check_login=check_login)
+            return True
+        self._refresh_mode_controls()
+        return False
+
+    def choose_local_root(self) -> None:
+        if self.busy:
+            return
+        if not self.is_local:
+            self._switch_mode("local")
+            return
+        root = filedialog.askdirectory(
+            title="选择本地媒体文件夹", parent=self,
+            initialdir=self.local_root if os.path.isdir(self.local_root)
+            else os.path.expanduser("~"))
+        if not root:
+            return
+        if os.path.normcase(os.path.abspath(root)) == \
+                os.path.normcase(os.path.abspath(self.local_root)):
+            return
+        if not self._discard_plans_for_switch():
+            return
+        self._enter_local(root)
+
+    def _enter_local(self, root: str) -> bool:
+        try:
+            client = LocalClient(
+                root,
+                index_path=os.path.join(self.data_dir, "local_index.json"),
+                log=self.log_threadsafe)
+        except Exception as e:
+            messagebox.showerror(APP_TITLE, str(e), parent=self)
+            self._refresh_mode_controls()
+            return False
+        self.local_client = client
+        self.local_root = client.root
+        self.settings["local_root"] = self.local_root
+        self._save_settings()
+        self.client = client
+        self.is_local = True
+        self.is_demo = False
+        self.dir_view_state = {}
+        self.plans = []
+        self._render_plans()
+        self.current_cid = client.root_id
+        self.current_item = client.root_item()
+        root_name = os.path.basename(client.root.rstrip("\\/")) or client.root
+        self.path_stack = [(client.root_id, root_name)]
+        self._clear_dir_tree()
+        self._refresh_mode_controls()
+        self._set_login_status("本地模式（不改 115）", "#176b33")
+        self._log(f"已切换到本地模式：{client.root}；"
+                  "只重命名本机文件，不会修改 115 网盘。"
+                  "分析时仍会联网查询豆瓣/Bangumi/IMDb/TMDB。")
+        self.refresh()
+        return True
+
+    def _enter_cloud(self, check_login: bool = True) -> None:
+        self.is_local = False
+        self.is_demo = False
+        if self.cloud_client is None:
+            self.cloud_client = P115Client(
+                self.data_dir, log=self.log_threadsafe)
+        self.client = self.cloud_client
+        self.dir_view_state = {}
+        self.plans = []
+        self._render_plans()
+        self.current_cid = "0"
+        self.current_item = None
+        self.path_stack = [("0", "根目录")]
+        self._clear_dir_tree()
+        self._refresh_mode_controls()
+        if self.cloud_client.cookie_dict():
+            if check_login:
+                self._set_login_status("检查登录…", "#888")
+                self._log("已切回 115 网盘，正在检查登录状态…")
+                self.run_async(
+                    lambda: self.cloud_client.is_logged_in(force=True),
+                    "login_check")
+            else:
+                self._set_login_status("已登录", "#176b33")
+        else:
+            self._set_login_status("未登录", "#b3261e")
+            self._log("已切回 115 网盘；请先登录后再浏览文件。")
+
+    def _undo_scope(self) -> str:
+        if self.is_local and self.local_client is not None:
+            return "local:" + os.path.normcase(self.local_client.root)
+        if self.is_demo:
+            return "demo"
+        return "cloud"
 
     # ------------------------------------------------------------ 目录
     @staticmethod
@@ -949,8 +1158,10 @@ class App(tk.Tk):
                                 parent=self)
             return
         if not self.client:
-            messagebox.showinfo(APP_TITLE, "请先登录 115 或使用演示模式。",
-                                parent=self)
+            messagebox.showinfo(
+                APP_TITLE,
+                "请先登录 115、使用演示模式，或切换到本地模式。",
+                parent=self)
             return
         DirRenameDialog(self, item, self._start_dir_rename)
 
@@ -1001,12 +1212,12 @@ class App(tk.Tk):
         if not ok:
             fail = "；".join(
                 f"{r.old_name}: {r.message}" for r in results if not r.ok)
-            fail = fail or "115 未返回改名结果"
+            fail = fail or "未返回改名结果"
             self._log(f"左侧目录改名失败：{fail}")
             messagebox.showerror(
                 APP_TITLE, f"改名失败：\n{fail}", parent=self)
             return
-        self.undo.record([op], results)
+        self.undo.record([op], results, scope=self._undo_scope())
         self._sync_renamed_item(item, op.fid, op.old_name, op.new_name)
         self._log(f"改名成功：{op.old_name} → {op.new_name}")
         if item.is_dir and item.fid == self.current_cid:
@@ -1176,7 +1387,10 @@ class App(tk.Tk):
 
     def _analyze(self, roots: list[P115Item]) -> None:
         if not self.client:
-            messagebox.showinfo(APP_TITLE, "请先登录 115，或使用演示模式。", parent=self)
+            messagebox.showinfo(
+                APP_TITLE,
+                "请先登录 115、使用演示模式，或切换到本地模式。",
+                parent=self)
             return
         if not roots:
             messagebox.showinfo(APP_TITLE, "请先在左侧选择要分析的文件夹或文件。", parent=self)
@@ -1480,6 +1694,8 @@ class App(tk.Tk):
 
     # ------------------------------------------------------------ NFO/图片
     def _nfo_mode_text(self) -> str:
+        if self.is_local:
+            return "本地模式：已有 NFO/图片只跟随改名，不删除"
         return ("已有 NFO/图片：删除后重存"
                 if self.settings.get("nfo_existing") == "replace"
                 else "已有 NFO/图片：跟随改名")
@@ -1563,7 +1779,9 @@ class App(tk.Tk):
                     plan.item.parent_id or "0")
         files = [it for it in self.client.list_tree(
             root_cid, max_depth=5) if not it.is_dir]
-        mode = self.settings.get("nfo_existing", "rename")
+        # 本地模式不提供删除/回收站操作，已有附件统一跟随改名。
+        mode = ("rename" if self.is_local else
+                self.settings.get("nfo_existing", "rename"))
         pairs: list[tuple] = []
         info_files: list[P115Item] = []
         if mode == "replace":
@@ -1635,12 +1853,14 @@ class App(tk.Tk):
                 str(item.get("mime") or "application/octet-stream"))
             existing.add((cid, filename.casefold()))
             uploads += 1
-            report(f"正在上传 NFO/图片 {idx}/{len(desired)}", 1)
+            action = "写入本地" if self.is_local else "上传"
+            report(f"正在{action} NFO/图片 {idx}/{len(desired)}", 1)
         if not units:
             report("没有需要保存的 NFO/图片", 1)
         return {"plan": plan, "source": prep.get("source", ""),
                 "mode": mode, "renames": renames, "deleted": deleted,
-                "uploads": uploads, "skipped": skipped, "units": units}
+                "uploads": uploads, "skipped": skipped, "units": units,
+                "local": bool(self.is_local)}
 
     def _save_nfo_task(self, plan: PlanItem, progress=None) -> dict:
         prep = self._prepare_nfo_task(plan, progress)
@@ -1703,7 +1923,7 @@ class App(tk.Tk):
                                 parent=self)
             return
         if not self.client or self.is_demo:
-            messagebox.showinfo(APP_TITLE, "演示模式不会上传 NFO/图片。",
+            messagebox.showinfo(APP_TITLE, "演示模式不会保存 NFO/图片。",
                                 parent=self)
             return
         if not p.ops:
@@ -1713,10 +1933,12 @@ class App(tk.Tk):
         mode = self._nfo_mode_text()
         extra = ("\n注意：会先删除与当前任务匹配的旧 .nfo/图片"
                  "（移到 115 回收站），同目录其他影片的资料不动。"
-                 if self.settings.get("nfo_existing") == "replace" else "")
+                 if not self.is_local and
+                 self.settings.get("nfo_existing") == "replace" else "")
+        target = "本地文件夹" if self.is_local else "115"
         if not messagebox.askyesno(
                 APP_TITLE,
-                f"将为「{p.title}」保存 NFO/图片到 115。\n{mode}\n"
+                f"将为「{p.title}」保存 NFO/图片到{target}。\n{mode}\n"
                 f"会生成 tvshow/每集 NFO 和 poster/fanart，只补齐缺失文件。"
                 f"{extra}\n\n是否继续？", parent=self):
             return
@@ -1757,6 +1979,13 @@ class App(tk.Tk):
             lambda: self._clear_nfo_scope(plan, root_cid, scope), "nfo_clear")
 
     def clear_nfo_artwork(self) -> None:
+        if self.is_local:
+            messagebox.showinfo(
+                APP_TITLE,
+                "本地模式不会删除或移动文件。\n"
+                "如需清理 NFO/图片，请在本机文件夹里手动处理。",
+                parent=self)
+            return
         if not self.client or self.is_demo:
             messagebox.showinfo(APP_TITLE, "演示模式不会删除文件。",
                                 parent=self)
@@ -2231,8 +2460,10 @@ class App(tk.Tk):
                                 parent=self)
             return
         if not self.client:
-            messagebox.showinfo(APP_TITLE, "请先登录 115 或使用演示模式。",
-                                parent=self)
+            messagebox.showinfo(
+                APP_TITLE,
+                "请先登录 115、使用演示模式，或切换到本地模式。",
+                parent=self)
             return
         TempRenameDialog(self, p, self._start_temp_rename)
 
@@ -2448,11 +2679,14 @@ class App(tk.Tk):
         for op in ops:
             if not op.new_name or op.new_name.strip() in ("", ".", ".."):
                 return f"目标名称为空：{op.old_name}"
+            if self.is_local and not is_valid_local_name(op.new_name):
+                return (f"目标名称包含 Windows 不允许的字符，"
+                        f"或以空格/句点结尾：\n{op.old_name} → {op.new_name}")
             if not op.is_dir:
                 old_ext = os.path.splitext(op.old_name)[1].lower()
                 new_ext = os.path.splitext(op.new_name)[1].lower()
                 if old_ext != new_ext:
-                    return (f"扩展名不一致（115 不允许改扩展名）：\n"
+                    return (f"扩展名不一致（不允许改扩展名）：\n"
                             f"{op.old_name} → {op.new_name}")
             key = (op.parent_id, op.new_name.casefold())
             if key in seen:
@@ -2562,7 +2796,7 @@ class App(tk.Tk):
         self._set_busy(False)
         ok = sum(1 for r in results if r.ok)
         fail = len(results) - ok
-        self.undo.record(ops, results)
+        self.undo.record(ops, results, scope=self._undo_scope())
         self._log(f"重命名完成：成功 {ok}，失败 {fail}。")
         # 如果当前目录本身被改名，更新路径显示
         for op in ops:
@@ -2577,8 +2811,9 @@ class App(tk.Tk):
             renames = sum(int(x.get("renames", 0)) for x in nfo_ok)
             deleted = sum(int(x.get("deleted", 0)) for x in nfo_ok)
             skipped = sum(int(x.get("skipped", 0)) for x in nfo_ok)
+            action = "写入本地" if self.is_local else "上传"
             nfo_msg = (f"自动保存 NFO/图片：{len(nfo_ok)} 个任务，"
-                       f"上传 {uploads}，改名 {renames}，删除 {deleted}，"
+                       f"{action} {uploads}，改名 {renames}，删除 {deleted}，"
                        f"跳过 {skipped}。")
             if nfo_bad:
                 nfo_msg += f"失败 {len(nfo_bad)} 个。"
@@ -2617,7 +2852,8 @@ class App(tk.Tk):
     def undo_last(self) -> None:
         if self.busy:
             return
-        found = self.undo.last_undoable()
+        scope = self._undo_scope()
+        found = self.undo.last_undoable(scope)
         if not found:
             messagebox.showinfo(APP_TITLE, "没有可以撤销的记录。", parent=self)
             return
@@ -2629,8 +2865,10 @@ class App(tk.Tk):
                 parent=self):
             return
         client = self.client
-        self.run_async(lambda: self.undo.undo_last(client, log=self.log_threadsafe),
-                       "undo")
+        self.run_async(
+            lambda: self.undo.undo_last(
+                client, log=self.log_threadsafe, scope=scope),
+            "undo")
 
     def _after_undo(self, results) -> None:
         self._set_busy(False)
@@ -2642,15 +2880,23 @@ class App(tk.Tk):
     def open_login(self) -> None:
         if self.busy:
             return
+        if (self.is_local or self.is_demo) and not self._switch_mode(
+                "cloud", check_login=False):
+            return
         if not isinstance(self.client, P115Client):
             self.client = P115Client(self.data_dir, log=self.log_threadsafe)
+            self.cloud_client = self.client
         LoginDialog(self, self.client)
 
     def open_cookie(self) -> None:
         if self.busy:
             return
+        if (self.is_local or self.is_demo) and not self._switch_mode(
+                "cloud", check_login=False):
+            return
         if not isinstance(self.client, P115Client):
             self.client = P115Client(self.data_dir, log=self.log_threadsafe)
+            self.cloud_client = self.client
         CookieDialog(self, self.client)
 
     def logout(self) -> None:
@@ -2668,14 +2914,20 @@ class App(tk.Tk):
     def enable_demo(self) -> None:
         if self.busy:
             return
+        if not self._discard_plans_for_switch():
+            return
         self.client = MockP115Client(log=self.log_threadsafe)
         self.is_demo = True
+        self.is_local = False
         self._set_login_status("演示模式（不改网盘）", "#176b33")
+        self.dir_view_state = {}
         self.path_stack = [("0", "根目录（演示）")]
         self.current_cid = "0"
         self.current_item = None
         self.plans = []
         self._render_plans()
+        self._clear_dir_tree()
+        self._refresh_mode_controls()
         self._log("已进入演示模式：数据是内存里的示例，不会登录或修改你的 115。")
         self.refresh()
 
@@ -2947,7 +3199,7 @@ class AboutDialog(tk.Toplevel):
         self.qq_link.configure(takefocus=True)
         ttk.Button(qq_row, text="二维码",
                    command=self._show_qq_qr).pack(side="left", padx=(8, 4))
-        ttk.Button(qq_row, text="打开频道",
+        ttk.Button(qq_row, text="在 QQ 中打开",
                    command=self._open_qq).pack(side="left")
         ttk.Label(
             frame,
@@ -2991,13 +3243,18 @@ class AboutDialog(tk.Toplevel):
             pass
 
     def _open_qq(self, event=None) -> str:
+        # 优先走 QQ 的频道 WebView；没装 QQ 或协议不可用时再交给浏览器。
+        if qq_channel.open_in_qq():
+            return "break"
         try:
             opened = webbrowser.open(qq_channel.QQ_CHANNEL_URL)
         except Exception:
             opened = False
         if not opened:
             messagebox.showinfo(
-                "QQ 频道", f"请手动打开：\n{qq_channel.QQ_CHANNEL_URL}",
+                "QQ 频道",
+                f"未能唤起 QQ，请手动在 QQ 中打开：\n"
+                f"{qq_channel.QQ_CHANNEL_URL}",
                 parent=self)
         return "break"
 
@@ -3173,21 +3430,30 @@ class QQChannelDialog(tk.Toplevel):
         url_label.bind("<Button-1>", self._open)
         url_label.bind("<Return>", self._open)
         url_label.bind("<space>", self._open)
-        ttk.Label(frame, text="用 QQ 扫码加入；二维码只在需要时打开。",
-                  foreground="#777").pack(anchor="center", pady=(4, 10))
+        ttk.Label(
+            frame, text="用 QQ 扫码加入；点击频道链接会在 QQ 中打开，"
+                        "未安装 QQ 时改用浏览器。",
+            foreground="#777", wraplength=360, justify="center").pack(
+                anchor="center", pady=(4, 10))
         btns = ttk.Frame(frame)
         btns.pack(side="bottom", fill="x")
-        ttk.Button(btns, text="打开频道", command=self._open).pack(side="left")
+        ttk.Button(btns, text="在 QQ 中打开",
+                   command=self._open).pack(side="left")
         ttk.Button(btns, text="关闭", command=self.destroy).pack(side="right")
 
     def _open(self, event=None) -> str:
+        # 优先唤起 QQ 自带的频道 WebView；失败再退回默认浏览器。
+        if qq_channel.open_in_qq():
+            return "break"
         try:
             opened = webbrowser.open(qq_channel.QQ_CHANNEL_URL)
         except Exception:
             opened = False
         if not opened:
             messagebox.showinfo(
-                "QQ 频道", f"请手动打开：\n{qq_channel.QQ_CHANNEL_URL}",
+                "QQ 频道",
+                f"未能唤起 QQ，请手动在 QQ 中打开：\n"
+                f"{qq_channel.QQ_CHANNEL_URL}",
                 parent=self)
         return "break"
 

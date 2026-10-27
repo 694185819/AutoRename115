@@ -13,6 +13,7 @@ def main():
     app.withdraw()
     app.start_demo = True
     app.enable_demo()
+    app.start_demo = False
     app.update()
     original = app.settings.get("risk_notice_dismissed", False)
 
@@ -36,10 +37,16 @@ def main():
     assert app.settings["risk_notice_dismissed"] is False, app.settings
     assert not dlg2.winfo_exists()
 
-    # 首次启动流程：未关闭提醒时先弹提醒，关掉后才打开登录窗口
+    # 演示/本地模式不弹出 115 登录提醒
     opened = []
     app.open_login = lambda: opened.append(1)
     app.settings["risk_notice_dismissed"] = False
+    app.is_demo = True
+    app._open_login_after_notice()
+    assert opened == [], opened
+    app.is_demo = False
+
+    # 首次启动流程：未关闭提醒时先弹提醒，关掉后才打开登录窗口
 
     def close_notice():
         for child in app.winfo_children():

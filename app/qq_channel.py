@@ -1,9 +1,33 @@
 # -*- coding: utf-8 -*-
 """QQ 频道入口与二维码资源。"""
 
+import os
+from urllib.parse import quote
+
 QQ_CHANNEL_NAME = "115资源互助小据点"
 QQ_CHANNEL_ID = "pd75067698"
 QQ_CHANNEL_URL = "https://pd.qq.com/s/c7b552021"
+# 频道主页；桌面 QQ 的链接处理会识别 /g/<频道号> 并在 QQ 内置窗口打开。
+QQ_CHANNEL_APP_URL = (
+    f"https://pd.qq.com/g/{QQ_CHANNEL_ID}"
+    "?mainSourceId=open_platform&subSourceId=QQshanchuan"
+)
+# 桌面 QQ 自带的 ExWindow 转发协议，实际加载在 QQ 的内置浏览器里。
+QQ_CHANNEL_SCHEME = (
+    "tencent://ExWindow?subcmd=forwardUrl&url="
+    + quote(QQ_CHANNEL_APP_URL, safe="")
+)
+
+
+def open_in_qq() -> bool:
+    """优先在 QQ 中打开频道；没有 QQ/协议时返回 False。"""
+    if os.name != "nt":
+        return False
+    try:
+        os.startfile(QQ_CHANNEL_SCHEME)
+        return True
+    except Exception:
+        return False
 
 # 由上面的频道地址生成的二维码 PNG（黑白高对比，避免离线环境无法生成）。
 QR_PNG_BASE64 = (
