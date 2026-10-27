@@ -20,7 +20,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from PIL import Image, ImageTk
 
-from . import nfo, qq_channel, updater
+from . import nfo, qc, qq_channel, updater
 from .episode_mapping import EpisodeMappingDialog
 from .local import LocalClient, is_valid_local_name
 from .manual_search import SOURCE_LABELS, ManualSearchDialog
@@ -245,6 +245,16 @@ class App(tk.Tk):
             return int(round(96 * cm / 2.54))
 
     def _build_ui(self) -> None:
+        """组装主界面：各面板分别由 _ui_* 方法构建，便于单独修改。"""
+        self._ui_window()
+        self._ui_top_bar()
+        self._ui_main_split()
+        self._ui_left_panel()
+        self._ui_right_panel()
+        self._ui_status_bar()
+
+    def _ui_window(self) -> None:
+        """窗口、主题与树形控件样式。"""
         self.title(APP_TITLE)
         # 在 1280 宽的基础上左右加宽：第一次 5cm，这次再拉长 5cm，
         # 合计 10cm（按当前屏幕 DPI 换算）；下方再增加 1cm 高度。
@@ -265,6 +275,8 @@ class App(tk.Tk):
         style.configure("TButton", font=("Microsoft YaHei UI", 9))
         style.configure("TLabel", font=("Microsoft YaHei UI", 9))
 
+    def _ui_top_bar(self) -> None:
+        """顶部栏与更新提示条。"""
         # 顶部
         top = ttk.Frame(self, padding=(8, 6))
         top.pack(fill="x")
@@ -300,14 +312,19 @@ class App(tk.Tk):
                    command=self.open_update_notice).pack(
                        side="right", pady=3)
 
+
+    def _ui_main_split(self) -> None:
+        """左右分栏容器。"""
         # 主体
         paned = ttk.Panedwindow(self, orient="horizontal")
         paned.pack(fill="both", expand=True, padx=16, pady=(0, 4))
         self.paned = paned
 
+    def _ui_left_panel(self) -> None:
+        """左侧：文件来源、导航、目录树与右键菜单。"""
         # 左侧目录：和右侧任务表紧挨着，只留一条细分隔线
-        left = ttk.Frame(paned)
-        paned.add(left, weight=2)
+        left = ttk.Frame(self.paned)
+        self.paned.add(left, weight=2)
 
         # 文件来源：网盘 / 本地文件夹。放在文件列表正上方。
         mode_bar = ttk.Frame(left)
@@ -391,9 +408,11 @@ class App(tk.Tk):
         self.dir_menu.add_command(label="刷新当前目录",
                                   command=self.refresh)
 
+    def _ui_right_panel(self) -> None:
+        """右侧：任务表、详情、影片资料与日志。"""
         # 右侧计划
-        right = ttk.Frame(paned)
-        paned.add(right, weight=5)
+        right = ttk.Frame(self.paned)
+        self.paned.add(right, weight=5)
         ptool = ttk.Frame(right)
         ptool.pack(fill="x", pady=(0, 4))
         ttk.Button(ptool, text="全选自动项", command=self.select_auto).pack(side="left")
@@ -604,12 +623,15 @@ class App(tk.Tk):
         self.log_text.pack(side="left", fill="both", expand=True)
         lvs.pack(side="right", fill="y")
 
+    def _ui_status_bar(self) -> None:
+        """底部状态栏与收尾。"""
         status = ttk.Frame(self, padding=(8, 4))
         status.pack(fill="x", side="bottom")
         self.status_var = tk.StringVar(value="就绪")
         ttk.Label(status, textvariable=self.status_var).pack(side="left")
         self.after(300, self._set_sash)
         self._refresh_mode_controls()
+
 
     def _set_sash(self) -> None:
         # 左栏默认拉宽一些；两栏之间只用 Panedwindow 自带的细分隔条
@@ -662,160 +684,218 @@ class App(tk.Tk):
         else:
             messagebox.showerror(APP_TITLE, raw, parent=self)
 
+    # 后台线程 → 界面的消息路由。每个 kind 对应一个 _on_<kind> 方法；
+    # 新增消息类型时只加一行路由，不用再增长 _handle 的 if/elif 链。
+    KIND_HANDLERS = {
+        "log": "_on_log",
+        "busy": "_on_busy",
+        "progress": "_on_progress",
+        "indeterminate": "_on_indeterminate",
+        "listing": "_on_listing",
+        "login_check": "_on_login_check",
+        "plans": "_on_plans",
+        "plans_verified": "_on_plans_verified",
+        "qr_token": "_on_qr_token",
+        "qr_status": "_on_qr_status",
+        "qr_done": "_on_qr_done",
+        "qr_expired": "_on_qr_expired",
+        "qr_error": "_on_qr_error",
+        "cookie_check": "_on_cookie_check",
+        "apply": "_on_apply",
+        "temp_rename": "_on_temp_rename",
+        "dir_rename": "_on_dir_rename",
+        "undo": "_on_undo",
+        "error": "_on_error",
+        "status": "_on_status",
+        "update_check": "_on_update_check",
+        "media_details": "_on_media_details",
+        "nfo_save": "_on_nfo_save",
+        "nfo_clear": "_on_nfo_clear",
+    }
+
     def _handle(self, kind: str, payload) -> None:
-        if kind == "log":
-            self._log(payload)
-        elif kind == "busy":
-            self._set_busy(bool(payload))
-        elif kind == "progress":
-            done, total, text = payload
-            text = str(text or "")
-            if total and total > 0:
-                try:
-                    if str(self.progress.cget("mode")) != "determinate":
-                        self.progress.stop()
-                        self.progress.configure(mode="determinate")
-                    self.progress.configure(
-                        maximum=max(1, total),
-                        value=min(max(0, done), total))
-                    self.progress_label.configure(text=f"{done}/{total}")
-                except Exception:
-                    pass
-            else:
-                # 总数未知：保留当前进度，只更新阶段文字，避免来回抽动
-                self.progress_label.configure(text="…")
-            short = text if len(text) <= 36 else text[:35] + "…"
-            # 详细阶段只显示在“等待处理的任务”右侧的上方进度区，
-            # 不再同步到底部状态栏，避免同一句话上下各出现一次。
-            self.progress_stage.configure(text=short)
-        elif kind == "indeterminate":
-            if payload:
-                self.progress.configure(mode="indeterminate")
-                self.progress.start(12)
-            else:
-                self.progress.stop()
-                self.progress.configure(mode="determinate", value=0)
-        elif kind == "listing":
-            self._set_busy(False)
-            cid, items = payload
-            # 快速连点“上一级/进入文件夹”时，忽略已经过期的目录响应
-            if cid != self.current_cid:
+        """按消息类型分发到 _on_<kind>；未知类型忽略。"""
+        name = self.KIND_HANDLERS.get(kind)
+        if name:
+            getattr(self, name)(payload)
+
+    def _on_log(self, payload) -> None:
+        self._log(payload)
+
+    def _on_busy(self, payload) -> None:
+        self._set_busy(bool(payload))
+
+    def _on_progress(self, payload) -> None:
+        done, total, text = payload
+        text = str(text or "")
+        if total and total > 0:
+            try:
+                if str(self.progress.cget("mode")) != "determinate":
+                    self.progress.stop()
+                    self.progress.configure(mode="determinate")
+                self.progress.configure(
+                    maximum=max(1, total),
+                    value=min(max(0, done), total))
+                self.progress_label.configure(text=f"{done}/{total}")
+            except Exception:
+                pass
+        else:
+            # 总数未知：保留当前进度，只更新阶段文字，避免来回抽动
+            self.progress_label.configure(text="…")
+        short = text if len(text) <= 36 else text[:35] + "…"
+        # 详细阶段只显示在“等待处理的任务”右侧的上方进度区，
+        # 不再同步到底部状态栏，避免同一句话上下各出现一次。
+        self.progress_stage.configure(text=short)
+
+    def _on_indeterminate(self, payload) -> None:
+        if payload:
+            self.progress.configure(mode="indeterminate")
+            self.progress.start(12)
+        else:
+            self.progress.stop()
+            self.progress.configure(mode="determinate", value=0)
+
+    def _on_listing(self, payload) -> None:
+        self._set_busy(False)
+        cid, items = payload
+        # 快速连点“上一级/进入文件夹”时，忽略已经过期的目录响应
+        if cid != self.current_cid:
+            return
+        self._fill_dir_tree(items)
+        self.status_var.set(f"已加载 {len(items)} 项")
+
+    def _on_login_check(self, payload) -> None:
+        self._set_busy(False)
+        # 用户可能在登录检查返回前就切到本地/演示模式，不能把
+        # “已登录”状态和刷新动作带到本地目录上。
+        if self.is_local or self.is_demo:
+            return
+        if payload:
+            self._set_login_status("已登录", "#176b33")
+            # 先恢复上次等待列表，再刷新目录；恢复成功后不能再
+            # 立刻发起新的忙碌任务（会互相覆盖进度状态）。
+            if self._restore_plans():
                 return
-            self._fill_dir_tree(items)
-            self.status_var.set(f"已加载 {len(items)} 项")
-        elif kind == "login_check":
-            self._set_busy(False)
-            # 用户可能在登录检查返回前就切到本地/演示模式，不能把
-            # “已登录”状态和刷新动作带到本地目录上。
-            if self.is_local or self.is_demo:
-                return
-            if payload:
-                self._set_login_status("已登录", "#176b33")
-                # 先恢复上次等待列表，再刷新目录；恢复成功后不能再
-                # 立刻发起新的忙碌任务（会互相覆盖进度状态）。
-                if self._restore_plans():
-                    return
-                self.refresh()
-            else:
-                self._set_login_status("登录已失效", "#b3261e")
-                self.open_login()
-        elif kind == "plans":
-            self.plans = payload
+            self.refresh()
+        else:
+            self._set_login_status("登录已失效", "#b3261e")
+            self.open_login()
+
+    def _on_plans(self, payload) -> None:
+        self.plans = payload
+        self._render_plans()
+        self._set_busy(False)
+        auto = sum(1 for p in self.plans if p.status == "auto")
+        review = sum(1 for p in self.plans if p.status == "review")
+        self.status_var.set(f"分析完成：{len(self.plans)} 项，可自动 {auto}，需确认 {review}")
+        self._log(self.status_var.get())
+        self._save_plans_cache()
+
+    def _on_plans_verified(self, payload) -> None:
+        ok, reason = payload
+        self._set_busy(False)
+        if ok:
+            self._log("离线恢复完成：文件均仍在原处，可以直接应用重命名。")
+            self.status_var.set(
+                f"已恢复 {len(self.plans)} 个等待任务（缓存）")
+        else:
+            self.plans = []
             self._render_plans()
-            self._set_busy(False)
-            auto = sum(1 for p in self.plans if p.status == "auto")
-            review = sum(1 for p in self.plans if p.status == "review")
-            self.status_var.set(f"分析完成：{len(self.plans)} 项，可自动 {auto}，需确认 {review}")
-            self._log(self.status_var.get())
-            self._save_plans_cache()
-        elif kind == "plans_verified":
-            ok, reason = payload
-            self._set_busy(False)
+            self._discard_plans_cache()
+            self._log(f"预览缓存已作废：{reason}。请重新分析选中。")
+            self.status_var.set("缓存已作废，请重新分析")
+
+    def _on_qr_token(self, payload) -> None:
+        dialog, token, image = payload
+        if dialog.winfo_exists():
+            dialog.show_token(token, image)
+
+    def _on_qr_status(self, payload) -> None:
+        dialog, status = payload
+        if dialog.winfo_exists():
+            dialog.show_status(status)
+
+    def _on_qr_done(self, payload) -> None:
+        dialog, ok, login_app = payload
+        if dialog.winfo_exists():
+            dialog.destroy()
+        if ok:
+            self.settings["login_app"] = login_app
+            self._save_settings()
+            self._set_login_status("已登录", "#176b33")
+            self._log(f"115 扫码登录成功（设备：{login_app}），"
+                      "Cookie 已保存，下次启动会自动登录。")
+            self.refresh()
+
+    def _on_qr_expired(self, payload) -> None:
+        dialog, status = payload
+        if dialog.winfo_exists():
+            dialog.show_expired(status)
+
+    def _on_qr_error(self, payload) -> None:
+        dialog, msg = payload
+        if dialog.winfo_exists():
+            dialog.show_error(msg)
+
+    def _on_cookie_check(self, payload) -> None:
+        dialog, ok, msg = payload
+        if dialog.winfo_exists():
             if ok:
-                self._log("离线恢复完成：文件均仍在原处，可以直接应用重命名。")
-                self.status_var.set(
-                    f"已恢复 {len(self.plans)} 个等待任务（缓存）")
-            else:
-                self.plans = []
-                self._render_plans()
-                self._discard_plans_cache()
-                self._log(f"预览缓存已作废：{reason}。请重新分析选中。")
-                self.status_var.set("缓存已作废，请重新分析")
-        elif kind == "qr_token":
-            dialog, token, image = payload
-            if dialog.winfo_exists():
-                dialog.show_token(token, image)
-        elif kind == "qr_status":
-            dialog, status = payload
-            if dialog.winfo_exists():
-                dialog.show_status(status)
-        elif kind == "qr_done":
-            dialog, ok, login_app = payload
-            if dialog.winfo_exists():
                 dialog.destroy()
-            if ok:
-                self.settings["login_app"] = login_app
-                self._save_settings()
                 self._set_login_status("已登录", "#176b33")
-                self._log(f"115 扫码登录成功（设备：{login_app}），"
-                          "Cookie 已保存，下次启动会自动登录。")
+                self._log("Cookie 验证成功。")
                 self.refresh()
-        elif kind == "qr_expired":
-            dialog, status = payload
-            if dialog.winfo_exists():
-                dialog.show_expired(status)
-        elif kind == "qr_error":
-            dialog, msg = payload
-            if dialog.winfo_exists():
-                dialog.show_error(msg)
-        elif kind == "cookie_check":
-            dialog, ok, msg = payload
-            if dialog.winfo_exists():
-                if ok:
-                    dialog.destroy()
-                    self._set_login_status("已登录", "#176b33")
-                    self._log("Cookie 验证成功。")
-                    self.refresh()
-                else:
-                    dialog.show_error(msg or "Cookie 无效或已过期。")
-        elif kind == "apply":
-            ops, results, auto_nfo, nfo_infos = payload
-            self._after_apply(ops, results, auto_nfo, nfo_infos)
-        elif kind == "temp_rename":
-            plan, old_op, new_op, results = payload
-            self._after_temp_rename(plan, old_op, new_op, results)
-        elif kind == "dir_rename":
-            item, op, results = payload
-            self._after_dir_rename(item, op, results)
-        elif kind == "undo":
-            results = payload
-            self._after_undo(results)
-        elif kind == "error":
-            self._set_busy(False)
-            self._show_task_error(payload)
-        elif kind == "status":
-            self.status_var.set(str(payload))
-        elif kind == "update_check":
-            release, error = payload
-            self._on_update_result(release, error)
-        elif kind == "media_details":
-            self._show_media_details(*payload)
-        elif kind == "nfo_save":
-            self._set_busy(False)
-            s = payload
-            action = "写入本地" if s.get("local") else "上传"
-            msg = (f"NFO/图片保存完成：{action} {s['uploads']}，"
-                   f"改名 {s['renames']}，删除 {s['deleted']}，"
-                   f"跳过 {s['skipped']}。")
-            self._log(msg)
-            messagebox.showinfo(APP_TITLE, msg, parent=self)
-        elif kind == "nfo_clear":
-            self._set_busy(False)
-            s = payload
-            where = "当前文件夹" if s.get("scope") == "current" else "所选任务"
-            msg = f"{where}：已移入 115 回收站的 NFO/图片 {s['count']} 个。"
-            self._log(msg)
-            messagebox.showinfo(APP_TITLE, msg, parent=self)
+            else:
+                dialog.show_error(msg or "Cookie 无效或已过期。")
+
+    def _on_apply(self, payload) -> None:
+        ops, results, auto_nfo, nfo_infos = payload
+        self._after_apply(ops, results, auto_nfo, nfo_infos)
+
+    def _on_temp_rename(self, payload) -> None:
+        plan, old_op, new_op, results = payload
+        self._after_temp_rename(plan, old_op, new_op, results)
+
+    def _on_dir_rename(self, payload) -> None:
+        item, op, results = payload
+        self._after_dir_rename(item, op, results)
+
+    def _on_undo(self, payload) -> None:
+        results = payload
+        self._after_undo(results)
+
+    def _on_error(self, payload) -> None:
+        self._set_busy(False)
+        self._show_task_error(payload)
+
+    def _on_status(self, payload) -> None:
+        self.status_var.set(str(payload))
+
+    def _on_update_check(self, payload) -> None:
+        release, error = payload
+        self._on_update_result(release, error)
+
+    def _on_media_details(self, payload) -> None:
+        self._show_media_details(*payload)
+
+    def _on_nfo_save(self, payload) -> None:
+        self._set_busy(False)
+        s = payload
+        action = "写入本地" if s.get("local") else "上传"
+        msg = (f"NFO/图片保存完成：{action} {s['uploads']}，"
+               f"改名 {s['renames']}，删除 {s['deleted']}，"
+               f"跳过 {s['skipped']}。")
+        self._log(msg)
+        messagebox.showinfo(APP_TITLE, msg, parent=self)
+
+    def _on_nfo_clear(self, payload) -> None:
+        self._set_busy(False)
+        s = payload
+        where = "当前文件夹" if s.get("scope") == "current" else "所选任务"
+        msg = f"{where}：已移入 115 回收站的 NFO/图片 {s['count']} 个。"
+        self._log(msg)
+        messagebox.showinfo(APP_TITLE, msg, parent=self)
+
 
     # ------------------------------------------------------------ 日志/忙碌
     def _log(self, text: str) -> None:
@@ -1856,6 +1936,11 @@ class App(tk.Tk):
         if p.folder_version > 1:
             parts.append(f"版本目录：V{p.folder_version}")
         parts.append(f"置信度：{p.confidence * 100:.0f}%")
+        codes = list(getattr(p, "qc_codes", None) or [])
+        if codes:
+            # 结构化原因码：直接显示“需确认的原因”，不再靠解析备注文字。
+            parts.append("原因：" + "、".join(
+                qc.CODE_LABELS.get(c, c) for c in codes))
         self.meta_label.configure(text="  |  ".join(parts))
         self.note_label.configure(text=p.note or "")
         self._refresh_info_sources(p)

@@ -24,249 +24,24 @@ from rapidfuzz import fuzz
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from . import decider, scoring
 from .models import Candidate, MatchResult, ParsedName
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 BANGUMI_UA = "AutoRename115/0.1 (local desktop tool)"
 
-RE_KANA = re.compile(r"[぀-ヿ]")
-RE_CJK = re.compile(r"[㐀-鿿]")
-
-# 附加在剧名后面的“季/部/Part”标记，用于还原主剧名
-SEASON_SUFFIXES = [
-    r"第\s*[0-9一二三四五六七八九十百]+\s*[季期部]",
-    r"\bSeason\s*\d+\b",
-    r"\bS\d{1,2}\b",
-    r"最终季", r"最终章",
-    r"\bFinal\s+Season\b",
-    r"\bPart\.?\s*\d+\b",
-    r"\bCour\s*\d+\b",
-]
-RE_SEASON_SUFFIX = re.compile(
-    r"(?i)(?:\s*[-–—:：·]?\s*(?:" + "|".join(SEASON_SUFFIXES) + r"))+\s*$")
-
-
-def has_kana(text: str) -> bool:
-    return bool(RE_KANA.search(text or ""))
-
-
-def norm_title(text: str) -> str:
-    """用于相似度比较：全半角、大小写、标点、空格。"""
-    text = unicodedata.normalize("NFKC", text or "").lower()
-    text = text.replace("&", " and ")
-    text = re.sub(r"[^\w぀-ヿ㐀-鿿]+", "", text)
-    return text
-
-
-def is_generic_episode_title(title: str) -> bool:
-    """TMDB 没有单集标题时会返回“第 1 集 / Episode 1 / 1화”这类占位符。
-
-    它们不能当成副标题写进文件名，否则每集都会变成
-    “S01E01.第.1.集”。
-    """
-    t = (title or "").strip()
-    if not t:
-        return True
-    return bool(re.fullmatch(
-        r"(?i)(?:第\s*\d+\s*[集话話回]|[ée]pisode\s*\d+|ep\.?\s*\d+|"
-        r"\d+\s*화|\d+)", t))
-
-
-def titles_agree(a: str, b: str) -> bool:
-    na, nb = norm_title(a), norm_title(b)
-    if not na or not nb:
-        return False
-    if fuzz.WRatio(na, nb) >= 80:
-        return True
-    shorter, longer = (na, nb) if len(na) <= len(nb) else (nb, na)
-    return len(shorter) >= 3 and shorter in longer
-
-
-def strong_titles_agree(a: str, b: str) -> bool:
-    """ID 校验用的严格标题比较，避免“假如”命中“假如是爱”。"""
-    na, nb = norm_title(a), norm_title(b)
-    if not na or not nb:
-        return False
-    if na == nb:
-        return True
-    if min(len(na), len(nb)) < 4:
-        return False
-    return titles_agree(a, b)
-
-
-def strip_season_markers(title: str) -> str:
-    """把“庆余年 第二季”“进击的巨人 最终季 Part.2”还原成主剧名。"""
-    t = unicodedata.normalize("NFKC", title or "").strip()
-    t = re.sub(r"[\(（\[【]\s*(?:第\s*[0-9一二三四五六七八九十]+\s*[季期]|"
-               r"Season\s*\d+)\s*[\)）\]】]\s*$", "", t, flags=re.I)
-    prev = None
-    while t and t != prev:
-        prev = t
-        t = RE_SEASON_SUFFIX.sub("", t).strip(" -–—:：·")
-    return t or title
-
-
-_CN_DIGITS = "零一二三四五六七八九"
-RE_SEASON_NUM = re.compile(
-    r"(?i)第\s*([0-9零〇一二两三四五六七八九十百]+)\s*[季期部]|"
-    r"\bSeason\s*(\d{1,2})\b|(?<![A-Za-z0-9])S(\d{1,2})(?!\d)|"
-    r"\bBook\s*(\d{1,2})\b")
-_BOOK_WORDS = {
-    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
-    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
-}
-
-
-def cn_season_number(n: int) -> str:
-    if n <= 0:
-        return _CN_DIGITS[0]
-    if n < 10:
-        return _CN_DIGITS[n]
-    if n == 10:
-        return "十"
-    if n < 20:
-        return "十" + _CN_DIGITS[n - 10]
-    if n < 100:
-        return _CN_DIGITS[n // 10] + "十" + (
-            _CN_DIGITS[n % 10] if n % 10 else "")
-    return str(n)
-
-
-def candidate_season(cand: Candidate) -> Optional[int]:
-    """从候选标题里读出“第三季 / Season 3 / S03 / Book 3”。"""
-    texts = [cand.title, cand.original_title]
-    if isinstance(cand.extra, dict):
-        texts += [str(a) for a in (cand.extra.get("aliases") or [])]
-    for text in texts:
-        text = str(text or "")
-        m = RE_SEASON_NUM.search(text)
-        if m:
-            raw = next((g for g in m.groups() if g), "")
-            if raw.isdigit():
-                return int(raw)
-            try:
-                from .parser import cn_number
-                val = cn_number(raw)
-                if val is not None:
-                    return val
-            except Exception:
-                pass
-        m = re.search(r"(?i)\bBook\s+([a-z]+)\b", text)
-        if m and m.group(1).lower() in _BOOK_WORDS:
-            return _BOOK_WORDS[m.group(1).lower()]
-    return None
-
-
-def fuzzy_queries(queries, media_type: str = "series",
-                  season: Optional[int] = None,
-                  year: Optional[int] = None,
-                  limit: int = 7) -> list[str]:
-    """把主标题、英文名、季号拆成多组搜索词。
-
-    先放所有主标题，再放季号变体。这样豆瓣/IMDb 都能先命中基础条目，
-    再补“第四季 / 第4季 / Season 4 / S04”等残缺结果。
-    """
-    bases: list[str] = []
-    seen: set[str] = set()
-
-    def add_base(text: str) -> None:
-        text = str(text or "").strip(" ._-–—:：·")
-        key = norm_title(text)
-        if len(key) < 2 or key in seen:
-            return
-        seen.add(key)
-        bases.append(text)
-
-    for q in queries:
-        add_base(q)
-
-    out: list[str] = []
-    out_seen: set[str] = set()
-
-    def add_out(text: str) -> None:
-        text = str(text or "").strip(" ._-–—:：·")
-        key = norm_title(text)
-        if len(key) < 2 or key in out_seen:
-            return
-        out_seen.add(key)
-        out.append(text)
-
-    season_mode = media_type == "series" and season is not None
-    for base in bases:
-        add_out(base)
-        if not season_mode:
-            continue
-        # 主标题的季号变体紧跟主标题，豆瓣前几条就能搜到第四季；
-        # 英文名仍排在后面，留给 IMDb/TMDB。
-        if RE_SEASON_NUM.search(base) or re.search(
-                r"(?i)最终季|final\s+season|part\s+\d+", base):
-            continue
-        cn = cn_season_number(season)
-        if RE_CJK.search(base):
-            add_out(f"{base} 第{cn}季")
-            if cn != str(season):
-                add_out(f"{base} 第{season}季")
-        if re.search(r"[A-Za-z]", base):
-            add_out(f"{base} Season {season}")
-            add_out(f"{base} S{season:02d}")
-
-    if year:
-        for base in bases[:2]:
-            add_out(f"{base} {year}")
-
-    return out[:limit]
-
-
-def strip_season_and_subtitle(title: str) -> str:
-    """“科拉传奇 第四季：平衡” -> “科拉传奇”。"""
-    t = strip_season_markers(title)
-    m = re.search(
-        r"(?i)\s*(?:第\s*[0-9零〇一二两三四五六七八九十百]+\s*[季期部]|"
-        r"Season\s*\d+|S\d{1,2}|Book\s*(?:\d+|[a-z]+))",
-        t)
-    if m:
-        t = t[:m.start()]
-    return t.strip(" -–—:：·") or title
-
-
-def douban_title_parts(title: str) -> tuple[str, str, Optional[int]]:
-    """拆豆瓣搜索结果标题：“中文名 第X季 English (年份)”。"""
-    text = html.unescape(str(title or "")).replace("‎", "").strip()
-    year = None
-    m = re.search(r"\((\d{4})\)\s*$", text)
-    if m:
-        year = int(m.group(1))
-        text = text[:m.start()].strip()
-    m = re.match(
-        r"^(.+?[㐀-鿿].*?)\s+([A-Za-z][A-Za-z0-9:.,'&!+\- ]*)$", text)
-    if m:
-        return m.group(1).strip(" -–—:：·"), m.group(2).strip(), year
-    m = re.search(r"([A-Za-z][A-Za-z0-9:.,'&!+\- ]{2,})$", text)
-    if m and m.start() > 0:
-        return (text[:m.start()].strip(" -–—:：·"),
-                m.group(1).strip(), year)
-    return text, "", year
-
-
-def extract_latin_aliases(text: str) -> list[str]:
-    out = []
-    for m in re.finditer(r"[A-Za-z][A-Za-z0-9:.'&!+\- ]{2,}", text or ""):
-        s = m.group(0).strip(" .-")
-        if len(s) >= 3:
-            out.append(s)
-    return out
-
-
-def _dedupe_str(items) -> list[str]:
-    out: list[str] = []
-    seen: set[str] = set()
-    for x in items:
-        x = str(x or "").strip()
-        if x and x.lower() not in seen:
-            seen.add(x.lower())
-            out.append(x)
-    return out
+# ------------------------------------------------------------ 文本工具
+# 实现已迁到 app/textnorm.py（纯文本，无网络/无缓存）；这里保留同名对象，
+# 既有 `from app.metadata import norm_title / fuzzy_queries ...` 不受影响。
+from .textnorm import (  # noqa: E402  （放在常量之后，保持原文件布局）
+    RE_CJK, RE_KANA, RE_SEASON_NUM, RE_SEASON_SUFFIX, SEASON_SUFFIXES,
+    _BOOK_WORDS, _CN_DIGITS, candidate_season, cn_season_number,
+    dedupe_str as _dedupe_str, douban_title_parts, extract_latin_aliases,
+    fuzzy_queries, has_kana, is_generic_episode_title, norm_title,
+    strong_titles_agree, strip_season_and_subtitle, strip_season_markers,
+    titles_agree,
+)
 
 
 class MetadataClient:
@@ -1494,328 +1269,59 @@ class MetadataClient:
         return res
 
     # ------------------------------------------------------------ 评分/筛选
+    # ------------------------------------------------------------ 评分/筛选
+    # 规则本体已迁到 app/scoring.py（纯函数，可单独测试）；
+    # 这里保留同名方法，既有调用方与行为不变。
+
     @staticmethod
     def _candidate_is_animation(cand: Candidate) -> bool:
-        """TMDB genre 16 / Bangumi“动画”标签 → 明确是动画条目。"""
-        if not isinstance(cand.extra, dict):
-            return False
-        if cand.extra.get("animation"):
-            return True
-        if cand.source == "bangumi":
-            tags = cand.extra.get("tags") or []
-            return any(k in str(t) for t in tags
-                       for k in ("动画", "动漫", "美漫"))
-        return False
-
-    # 只是分区/版本说明的短词，不能单独拿来确认一部作品。
-    _WEAK_ANCHOR_NAMES = {
-        "剧", "番", "片", "影", "电视剧", "剧集", "电影", "影片",
-        "动画", "动漫", "动画片", "番剧", "新番", "美剧", "英剧",
-        "韩剧", "日剧", "国产剧", "国产动画", "美漫", "美国动画",
-        "欧美动画", "合集", "系列", "全系列", "全集", "其他", "其它",
-        "剧版", "影版", "电影版", "电视剧版", "真人版", "动画版",
-        "网剧版", "网络剧版", "短剧版", "字幕", "双语", "中字",
-    }
+        return scoring.candidate_is_animation(cand)
 
     @classmethod
     def _anchor_titles(cls, parsed: ParsedName) -> list[str]:
-        """自动匹配必须对得上的本地标题/别名。
-
-        目录名常把中英文写在一起（“异国日记 Ikoku Nikki”），整串和
-        官方条目很少逐字相同；必须把中文段、英文段也各算一个锚点，
-        否则正确候选会被锚点校验当成“无关候选”淘汰，任务只能进需确认。
-        """
-        parts: list[str] = []
-        for text in [parsed.title] + list(parsed.queries or []):
-            for part in cls._anchor_parts(str(text or "")):
-                if part not in parts:
-                    parts.append(part)
-        if parsed.file_season is not None:
-            # 本地没写季号、季号来自文件名时，“第一季/第二季”这类别名
-            # 不是可靠锚点：任何一季的官方标题都可能对得上。
-            parts = [p for p in parts if not cls._season_alias(p)]
-        out: list[str] = []
-        seen: set[str] = set()
-        for text in parts:
-            key = norm_title(text)
-            if len(key) < 2 or key in cls._WEAK_ANCHOR_NAMES or key in seen:
-                continue
-            seen.add(key)
-            out.append(text)
-        return out
+        return scoring.anchor_titles(parsed)
 
     @staticmethod
     def _anchor_parts(text: str) -> list[str]:
-        """整串 + 其中文段 + 其英文/罗马字段。"""
-        text = str(text or "").strip()
-        if not text:
-            return []
-        out = [text]
-        for run in re.findall(r"[㐀-鿿぀-ヿ]{2,}", text):
-            out.append(run)
-        for run in re.findall(r"[A-Za-z][A-Za-z0-9'&!+\-]*(?:[ .][A-Za-z0-9'&!+\-]+)*",
-                              text):
-            run = run.strip(" .-")
-            if len(run) >= 3 and re.search(r"[A-Za-z]{2,}", run):
-                out.append(run)
-        return out
+        return scoring.anchor_parts(text)
 
     @staticmethod
     def _season_alias(text: str) -> bool:
-        t = str(text or "").strip()
-        return bool(t) and (
-            re.fullmatch(r"(?i)(?:Season|S|第)\s*\d+\s*季?", t) is not None or
-            re.fullmatch(r"第[一二三四五六七八九十]+季", t) is not None)
+        return scoring.season_alias(text)
 
     @staticmethod
     def _candidate_names(cand: Candidate) -> list[str]:
-        names = [cand.title, cand.original_title]
-        if isinstance(cand.extra, dict):
-            names += list(cand.extra.get("aliases") or [])
-        return [str(n).strip() for n in names if str(n or "").strip()]
+        return scoring.candidate_names(cand)
 
     @classmethod
     def _combo_anchors(cls, parsed: ParsedName) -> list[str]:
-        """本地整串名，以及按分隔符/中英文边界拆出的 3 字以上片段。"""
-        out: list[str] = []
-        texts = [parsed.title] + list(parsed.queries or [])
-        for text in texts:
-            text = str(text or "").strip()
-            if not text:
-                continue
-            for part in re.split(r"[\s/|,;:\[\]【】()（）·•]+", text):
-                part = part.strip(" -–—_.")
-                key = norm_title(part)
-                if len(key) < 3 or key in cls._WEAK_ANCHOR_NAMES:
-                    continue
-                if part not in out:
-                    out.append(part)
-            # 中英文混写没有分隔符时按字母/汉字边界再拆一次
-            for run in re.findall(r"[A-Za-z][A-Za-z0-9'&!+\-]*(?: [A-Za-z0-9'&!+\-]+)*",
-                                  text):
-                run = run.strip(" .-")
-                if len(norm_title(run)) >= 3 and run not in out:
-                    out.append(run)
-        return out
+        return scoring.combo_anchors(parsed)
 
     @staticmethod
     def _names_really_agree(a: str, b: str) -> bool:
-        """锚点用的保守比较：短名只认包含或极相似，长名才允许轻微错字。"""
-        na, nb = norm_title(a), norm_title(b)
-        if not na or not nb:
-            return False
-        if na == nb:
-            return True
-        shorter, longer = (na, nb) if len(na) <= len(nb) else (nb, na)
-        if shorter in longer:
-            return True
-        return len(shorter) >= 4 and fuzz.WRatio(na, nb) >= 92
+        return scoring.names_really_agree(a, b)
 
     @classmethod
     def _candidate_matches_anchor(cls, cand: Candidate,
                                   anchors: list[str]) -> bool:
-        """候选标题/别名是否和本地锚点有真正的文字重合。
-
-        短锚点（2 个字）只接受完全同名，避免“剧版”命中
-        “剧版超能陆战队番外短片”这种前缀伪匹配。
-        反向也成立：官方中文名较长、本地是简称（“女子落语”对
-        “女子落语 じょしらく”）时，本地名包含在官方名里也算对得上。
-        """
-        if not anchors:
-            return True
-        names = cls._candidate_names(cand)
-        for anchor in anchors:
-            an = norm_title(anchor)
-            if not an:
-                continue
-            for name in names:
-                cn = norm_title(name)
-                if not cn:
-                    continue
-                if cn == an:
-                    return True
-                if len(an) < 3:
-                    continue
-                if titles_agree(name, anchor):
-                    return True
-                if an in cn and len(an) >= 3:
-                    return True
-        return False
+        return scoring.candidate_matches_anchor(cand, anchors)
 
     def _score(self, parsed: ParsedName, cand: Candidate,
                media_type: str) -> float:
-        queries = fuzzy_queries(parsed.queries or [parsed.title], media_type,
-                                parsed.season, parsed.year, limit=7)
-        cand_titles = [cand.title, cand.original_title]
-        if isinstance(cand.extra, dict) and cand.extra.get("aliases"):
-            cand_titles += list(cand.extra["aliases"])
-        cand_norms = [norm_title(t) for t in cand_titles if t]
-        best_title = 0.0
-        exact_title = False
-        for q in queries:
-            qn = norm_title(q)
-            # 单字搜索词（“剧”“番”）没有检索价值：partial_ratio 对任何
-            # 长标题都接近 100%，连 WRatio 也会给出 0.6 的假高分。
-            if len(qn) < 2:
-                continue
-            for cn in cand_norms:
-                if not cn:
-                    continue
-                if qn == cn:
-                    best_title = 1.0
-                    exact_title = True
-                    continue
-                w = fuzz.WRatio(qn, cn) / 100.0
-                if len(qn) == 2:
-                    best_title = max(best_title, w)
-                    continue
-                # partial_ratio 对“候选标题里含一段相同文字”给满分，
-                # 是“女子落语 OAD”抢走“女子落语”这类近似条目的来源。
-                # 只在两段文字长度接近时采用，分数也要打折。
-                shorter = min(len(qn), len(cn))
-                longer = max(len(qn), len(cn))
-                partial = fuzz.partial_ratio(qn, cn) / 100.0
-                if shorter >= max(4, int(longer * 0.6)):
-                    partial *= 0.85
-                else:
-                    partial *= 0.6
-                best_title = max(best_title, w, partial)
-
-        year_score = 0.6
-        if parsed.year and cand.year:
-            d = abs(parsed.year - cand.year)
-            year_score = 1.0 if d == 0 else (0.8 if d == 1 else (0.5 if d == 2 else 0.0))
-        elif cand.year:
-            year_score = 0.65
-
-        want = "tv" if media_type == "series" else "movie"
-        type_score = 1.0 if cand.kind == want else 0.3
-        if not cand.kind:
-            type_score = 0.6
-
-        score = 0.64 * best_title + 0.22 * year_score + 0.14 * type_score
-        if cand.source in ("douban", "bangumi") and RE_CJK.search(parsed.title or ""):
-            score += 0.02
-        if cand.source == "imdb" and re.search(r"[A-Za-z]", parsed.title or ""):
-            score += 0.02
-        # full_exact：和本地名称（整串或其中某一段）完全相同；
-        # anchor_exact：再加上官方名本身含本地名的包含匹配，用来
-        # 防止番外/短片等近似条目抢占主条目。“Name OAD”不算精确。
-        exact_title = (
-            norm_title(cand.title) == norm_title(parsed.title) or
-            norm_title(cand.original_title) == norm_title(parsed.title))
-        if exact_title:
-            # 主剧条目优先于同名番外/小剧场（如“葬送的芙莉莲 ～●●的魔法～”）
-            score += 0.04
-        if not isinstance(cand.extra, dict):
-            cand.extra = {}
-        local_parts = {norm_title(p) for p in
-                       ([parsed.title] + list(parsed.queries or []))
-                       if norm_title(p)}
-        anchor_parts = {norm_title(p) for p in self._anchor_titles(parsed)
-                        if norm_title(p)}
-        cand_norm_set = {cn for cn in cand_norms if cn}
-        # 只认“候选名 == 本地整串/某一段”，以及“候选名含本地名”
-        # （官方名较长时）。反过来“本地含候选名”会让短候选
-        # （“女子落语OAD”对“女子落语[じょしらく]”）也算精确。
-        contains_local = any(
-            lp in cn for cn in cand_norm_set for lp in anchor_parts
-            if len(lp) >= 3)
-        cand.extra["anchor_exact"] = int(
-            bool(cand_norm_set & local_parts) or contains_local)
-        # 番外/短片：“女子落语 OAD”不能只看 partial 就当成主条目
-        weak_suffix = re.search(
-            r"(?i)(?:\b(?:OAD|OVA|SP|SPECIAL|SHORT)\b|短片|番外|小剧场|特别篇)",
-            cand.title or "")
-        if weak_suffix and not exact_title:
-            score = max(0.0, score - 0.15)
-        # 季号明确时，第三季不能抢第四季的任务。
-        if media_type == "series":
-            cs = candidate_season(cand)
-            if parsed.season is not None and cs is not None:
-                match_season = cs == parsed.season
-                score += 0.05 if match_season else -0.18
-                cand.extra["season_score"] = 1.0 if match_season else 0.0
-                cand.extra["candidate_season"] = cs
-            elif parsed.season is None and cs is not None:
-                # 本地没写季号时优先主剧条目，别让“第二季”抢走第一季
-                score -= 0.08
-                cand.extra["season_score"] = 0.5
-                cand.extra["candidate_season"] = cs
-        cand.extra["title_score"] = round(best_title, 4)
-        cand.extra["year_score"] = year_score
-        cand.extra["type_score"] = type_score
-        return max(0.0, min(1.0, score))
+        return scoring.score(parsed, cand, media_type)
 
     @staticmethod
     def _kind_ok(c: Candidate, media_type: str) -> bool:
-        if not c.kind:
-            return True
-        want = "tv" if media_type == "series" else "movie"
-        return c.kind == want
+        return scoring.kind_ok(c, media_type)
 
     def _pick_primary(self, cands: list[Candidate],
                       media_type: str) -> Optional[Candidate]:
-        pool = [c for c in cands if c and self._kind_ok(c, media_type)]
-        if not pool:
-            return None
-        # 与本地标题完全一致的条目优先，避免高季号/高年份的近似条目
-        # 靠模糊分抢走主条目（Jellyfin TMDB provider 也采用这一策略）。
-        exact = [c for c in pool if isinstance(c.extra, dict) and
-                 c.extra.get("anchor_exact")]
-        if exact:
-            pool = exact
-        def good(c: Candidate) -> bool:
-            ts = float(c.extra.get("title_score", 0))
-            # 季条目有时少了系列前缀（“降世神通 第二季”），
-            # 标题分不到 0.8，但季号完全匹配，仍应参与选择。
-            return ts >= 0.8 or (
-                ts >= 0.70 and c.extra.get("season_score") == 1.0)
-        picked = [c for c in pool if good(c)]
-        return max(picked, key=lambda c: c.score, default=None)
+        return scoring.pick_primary(cands, media_type)
 
     def _pick_imdb(self, cands: list[Candidate], media_type: str,
                    anchor_year: Optional[int],
                    aliases: tuple[str, ...] = ()) -> Optional[Candidate]:
-        alias_norms = [norm_title(a) for a in aliases if a]
-        good: list[Candidate] = []
-        for c in cands:
-            if not self._kind_ok(c, media_type):
-                continue
-            if not isinstance(c.extra, dict):
-                c.extra = {}
-            ts = float(c.extra.get("title_score", 0))
-            # IMDb 条目名常是英文，而本地文件名是中文/日文；用 Bangumi 别名比对
-            alias_ts = 0.0
-            cn = norm_title(c.title)
-            if cn and alias_norms:
-                alias_ts = max(fuzz.WRatio(cn, a) / 100.0 for a in alias_norms)
-            c.extra["alias_title_score"] = round(alias_ts, 4)
-            best_ts = max(ts, alias_ts)
-            year_ok = (anchor_year is None or c.year is None or
-                       abs(c.year - anchor_year) <= 1)
-            exact = any(
-                cn and cn in alias_norms
-                for cn in (norm_title(c.title), norm_title(c.original_title)))
-            c.extra["imdb_exact"] = 1 if exact else 0
-            if best_ts >= 0.82 and (year_ok or exact):
-                c.score = max(c.score, best_ts * 0.95)
-                if exact:
-                    c.score = min(1.0, c.score + 0.02)
-                good.append(c)
-                continue
-            if best_ts >= 0.62 and anchor_year and c.year and c.year == anchor_year:
-                c.score = max(c.score, best_ts * 0.9)
-                if exact:
-                    c.score = min(1.0, c.score + 0.02)
-                good.append(c)
-        # 和主来源一样：有精确同名/别名条目时，不让模糊近似条目
-        # 仅凭年份或轻微更高的相似分抢走 IMDb ID。
-        exact_good = [c for c in good
-                      if isinstance(c.extra, dict) and c.extra.get("imdb_exact")]
-        pool = exact_good or good
-        return max(pool, key=lambda c: (
-            c.score, c.extra.get("imdb_exact", 0), -c.rank), default=None)
+        return scoring.pick_imdb(cands, media_type, anchor_year, aliases)
 
     # ------------------------------------------------------------ 主剧名
     def _series_identity(self, base: str) -> dict:
@@ -1964,8 +1470,12 @@ class MetadataClient:
         return out
 
     # ------------------------------------------------------------ 匹配
-    def match(self, parsed: ParsedName, media_type: str,
-              category: str = "") -> MatchResult:
+    def search_pool(self, parsed: ParsedName, media_type: str
+                    ) -> tuple[list[str], dict[str, list[Candidate]]]:
+        """按搜索词把四个来源的候选抓回来（带扩展查询与提前停止）。
+
+        只负责"搜"，不负责"选"；选择交给 app.decider.decide()。
+        """
         base_queries = _dedupe_str(parsed.queries or [parsed.title])
         # 一个字（“剧”“番”）搜不出片名：整轮自动搜索直接放弃，
         # 不要退回去用这些词，否则又会搜到“剧场版/京剧猫”之类的错误条目。
@@ -1974,13 +1484,12 @@ class MetadataClient:
         queries = fuzzy_queries(base_queries, media_type, parsed.season,
                                 parsed.year, limit=6)
         queries = [q for q in queries if len(norm_title(q)) >= 2]
-        res = MatchResult()
+        pools: dict[str, list[Candidate]] = {
+            "bangumi": [], "douban": [], "imdb": [], "tmdb": []}
         if not queries:
-            res.notes.append("搜索词太短（单字或容器名），已跳过自动搜索；"
-                             "请右键任务使用“手动搜索”。")
-            return res
+            return queries, pools
 
-        bangumi_all: list[Candidate] = []
+        bangumi_all = pools["bangumi"]
         if self.use_bangumi:
             for q in queries[:2]:
                 bangumi_all += self.search_bangumi(q)
@@ -2010,7 +1519,7 @@ class MetadataClient:
             elif b.title:
                 douban_queries.append(b.title)
 
-        douban_all: list[Candidate] = []
+        douban_all = pools["douban"]
         for q in _dedupe_str(douban_queries)[:4]:
             got = self.search_douban(q)
             douban_all += got
@@ -2021,309 +1530,27 @@ class MetadataClient:
             if d.original_title and d.extra.get("title_score", 0) >= 0.75:
                 imdb_queries.append(d.original_title)
 
-        imdb_all: list[Candidate] = []
+        imdb_all = pools["imdb"]
         for q in _dedupe_str(imdb_queries)[:8]:
             imdb_all += self.search_imdb(q)
 
-        tmdb_all: list[Candidate] = []
         if self.tmdb_key:
             for q in queries[:2]:
-                tmdb_all += self.search_tmdb(q, media_type)
+                pools["tmdb"] += self.search_tmdb(q, media_type)
 
-        for c in bangumi_all + douban_all + imdb_all + tmdb_all:
+        for c in bangumi_all + douban_all + imdb_all + pools["tmdb"]:
             c.score = self._score(parsed, c, media_type)
+        return queries, pools
 
-        # 文件夹归属（动画区/电视剧区）参与候选排序：
-        # 同一个中文名下既有动画又有真人剧时，优先选和目录一致的那个。
-        if category in ("anime", "jp_anime", "cn_anime", "us_anime",
-                        "west_anime", "tv", "movie"):
-            want_anime = category in ("anime", "jp_anime", "cn_anime",
-                                      "us_anime", "west_anime")
-            for c in bangumi_all + douban_all + imdb_all + tmdb_all:
-                is_anim = self._candidate_is_animation(c)
-                if is_anim:
-                    if want_anime:
-                        c.score = min(1.0, c.score + 0.06)
-                    else:
-                        c.score = max(0.0, c.score - 0.10)
-                elif isinstance(c.extra, dict) and \
-                        c.extra.get("animation") is False and want_anime:
-                    # 动画目录里明确不是动画的条目（如真人版）要明显降权，
-                    # 否则“降世神通 第二季”会输给同名的 2026 真人版。
-                    c.score = max(0.0, c.score - 0.18)
-
-        def dedupe(cands: list[Candidate]) -> list[Candidate]:
-            by_id: dict[tuple[str, str], Candidate] = {}
-            for c in cands:
-                k = (c.source, c.sid)
-                if k not in by_id or c.score > by_id[k].score:
-                    by_id[k] = c
-            return list(by_id.values())
-
-        bangumi_all = dedupe(bangumi_all)
-        douban_all = dedupe(douban_all)
-        imdb_all = dedupe(imdb_all)
-        tmdb_all = dedupe(tmdb_all)
-
-        # 自动匹配的主结果必须和本地标题/别名有真正的文字重合。
-        # 仅靠“剧版”“第一季”这类前缀或高年份拿高分的条目直接淘汰，
-        # 否则 Big Hero 6 会因为标题以“剧版”开头而抢走一部布袋戏。
-        anchors = self._anchor_titles(parsed)
-        if anchors:
-            def anchor_ok(c: Candidate) -> bool:
-                return self._candidate_matches_anchor(c, anchors)
-            dropped = [
-                c.title for c in bangumi_all + douban_all + tmdb_all
-                if not anchor_ok(c) and c.title]
-            bangumi_all = [c for c in bangumi_all if anchor_ok(c)]
-            douban_all = [c for c in douban_all if anchor_ok(c)]
-            tmdb_all = [c for c in tmdb_all if anchor_ok(c)]
-            if dropped:
-                shown = "、".join(_dedupe_str(dropped)[:6])
-                # 这些是搜索接口顺带返回的模糊结果，已被锚点校验淘汰；
-                # 详情只写运行日志，避免预览里看起来像是采用了它们。
-                self.log(f"自动匹配已过滤无关候选（未采用）：{shown}")
-                res.notes.append(
-                    "已忽略标题与本地不一致的候选"
-                    f"（{len(_dedupe_str(dropped))} 个，未采用）。")
-
-        # 电影年份是最强的消歧信息：有正确年份的候选时，先排除年份差
-        # 超过 1 年的同名条目（Jellyfin TMDB 搜索也采用类似过滤）。
-        # 剧集首播年与季年份可能不同，不能这样硬过滤。
-        if media_type == "movie" and parsed.year:
-            def year_ok(c: Candidate) -> bool:
-                return c.year is None or abs(c.year - parsed.year) <= 1
-            kept_bg = [c for c in bangumi_all if year_ok(c)]
-            kept_db = [c for c in douban_all if year_ok(c)]
-            kept_tmdb = [c for c in tmdb_all if year_ok(c)]
-            if kept_bg:
-                bangumi_all = kept_bg
-            if kept_db:
-                douban_all = kept_db
-            if kept_tmdb:
-                tmdb_all = kept_tmdb
-
-        best_bg = self._pick_primary(bangumi_all, media_type)
-        best_db = self._pick_primary(douban_all, media_type)
-        best_tmdb = self._pick_primary(tmdb_all, media_type)
-        if not any((best_bg, best_db, best_tmdb)):
-            # 严格锚点把全部候选都淘汰时，再给一次“整串组合名”机会：
-            # 本地是“异国日记 Ikoku Nikki”而官方只有英文名时，严格
-            # 第一轮会一个都不剩；第二轮要求候选名和本地整串/分隔段
-            # 真正相似（不是 partial 包含），仍不满足就让任务进需确认。
-            combo = self._combo_anchors(parsed)
-            if combo:
-                def combo_ok(c: Candidate) -> bool:
-                    if not self._candidate_matches_anchor(c, combo):
-                        return False
-                    names = [norm_title(n) for n in
-                             self._candidate_names(c) if norm_title(n)]
-                    return any(self._names_really_agree(n, cp)
-                               for n in names for cp in combo)
-                best_bg = self._pick_primary(
-                    [c for c in bangumi_all if combo_ok(c)], media_type)
-                best_db = self._pick_primary(
-                    [c for c in douban_all if combo_ok(c)], media_type)
-                best_tmdb = self._pick_primary(
-                    [c for c in tmdb_all if combo_ok(c)], media_type)
-        primary_pool = [c for c in (best_bg, best_db, best_tmdb) if c]
-        primary = max(primary_pool, key=lambda c: c.score, default=None)
-
-        anchor_year = (primary.year if primary and primary.year else parsed.year)
-        known_aliases: list[str] = []
-        for c in (best_bg, best_db, best_tmdb):
-            if not c:
-                continue
-            if isinstance(c.extra, dict):
-                known_aliases += list(c.extra.get("aliases") or [])
-            if c.original_title and re.search(r"[A-Za-z]", c.original_title):
-                known_aliases.append(c.original_title)
-        best_imdb = self._pick_imdb(imdb_all, media_type, anchor_year,
-                                    tuple(_dedupe_str(known_aliases)))
-
-        # 没有豆瓣/Bangumi 时，可靠的 IMDb 结果也可以作为主结果（常见于英美剧）。
-        # 但只有当它的标题/别名也能对得上本地锚点时才允许，
-        # 否则 IMDb 的模糊前缀同样会把整部剧带偏。
-        if primary is None and best_imdb and anchors and \
-                not self._candidate_matches_anchor(best_imdb, anchors):
-            best_imdb = None
-        if primary is None and best_imdb and \
-                max(best_imdb.extra.get("title_score", 0),
-                    best_imdb.extra.get("alias_title_score", 0)) >= 0.8:
-            primary = best_imdb
-
-        # 跨来源核对：只有和主结果标题（以及年份）对得上的 Bangumi 条目，
-        # 才有资格贡献原名/地区/动画标记。否则就是拿 A 片的标题配 B 片的
-        # 原名和地区（之前“寄生兽”被当成国产动画就是这个原因）。
-        def _agrees_with_primary(c: Optional[Candidate]) -> bool:
-            if not c or not primary:
-                return False
-            if primary.year and c.year and abs(primary.year - c.year) > 1:
-                return False
-            if c is primary or titles_agree(primary.title, c.title):
-                return True
-            # 中英文标题不同（IMDb 英文名 vs Bangumi 中文名）时，
-            # 只要这条 Bangumi 自己也是高分命中同一个搜索词，仍可采用。
-            return bool(isinstance(c.extra, dict) and
-                        c.extra.get("title_score", 0) >= 0.85)
-
-        bg_ok = _agrees_with_primary(best_bg)
-        if best_bg and not bg_ok:
-            res.notes.append(
-                f"忽略来源不一致的 Bangumi 条目：{best_bg.title}")
-        res.douban = best_db
-        res.bangumi = best_bg if bg_ok else None
-        res.tmdb = best_tmdb
-        res.imdb = best_imdb
-
-        # 主标题
-        if primary:
-            if primary.source == "imdb":
-                res.title_zh = primary.title
-                res.title_original = primary.title
-            else:
-                res.title_zh = primary.title
-                res.title_original = (
-                    (best_bg.original_title if bg_ok else "") or
-                    (best_imdb.title if best_imdb else "") or
-                    primary.original_title)
-        elif best_imdb:
-            res.title_zh = best_imdb.title
-            res.title_original = best_imdb.title
-        else:
-            res.title_zh = parsed.title
-            res.title_original = ""
-
-        res.year = (primary.year if primary and primary.year else
-                    (best_imdb.year if best_imdb else parsed.year))
-        res.imdb_id = best_imdb.sid if best_imdb else ""
-        res.tmdb_id = best_tmdb.sid if best_tmdb else ""
-        res.douban_id = best_db.sid if best_db else ""
-        res.bangumi_id = best_bg.sid if bg_ok else ""
-
-        # 地区：用于区分日番（简洁命名）与国产动画/电视剧（带规格）
-        country = ""
-        if bg_ok and isinstance(best_bg.extra, dict):
-            country = best_bg.extra.get("country", "")
-        if not country and primary and isinstance(primary.extra, dict):
-            country = primary.extra.get("country", "")
-        if not country and primary and isinstance(primary.extra, dict):
-            # TMDB 搜索结果的原始语言也是可靠分类依据
-            lang = str(primary.extra.get("lang") or "")
-            if lang == "ja":
-                country = "jp"
-            elif lang in ("zh", "cn"):
-                country = "cn"
-            elif lang == "en":
-                country = "us"
-        if not country:
-            orig = (best_bg.original_title if bg_ok else "") or \
-                   (primary.original_title if primary else "")
-            if has_kana(orig):
-                country = "jp"
-        res.country = country
-        if bg_ok and isinstance(best_bg.extra, dict):
-            tags = [str(t) for t in (best_bg.extra.get("tags") or [])]
-            res.animation = any(
-                k in t for t in tags for k in ("动画", "动漫", "美漫"))
-        # TMDB genre 16（Animation）比目录名可靠；IMDb/TMDB 分类归属
-        # 也要参与判断，避免真人剧被归成动画。
-        if best_tmdb and isinstance(best_tmdb.extra, dict) and \
-                best_tmdb.extra.get("animation"):
-            res.animation = True
-
-        # 置信度：标题分是核心，年份/类型只是修正；跨来源必须标题相似才算印证
-        if primary:
-            conf = primary.score
-            if best_imdb and best_imdb is not primary:
-                y1, y2 = primary.year, best_imdb.year
-                if y1 and y2 and abs(y1 - y2) <= 1:
-                    conf += 0.05
-                else:
-                    conf += 0.02
-            for other in (best_bg, best_db, best_tmdb):
-                if other and other is not primary and titles_agree(primary.title, other.title):
-                    if (not primary.year or not other.year or
-                            abs(primary.year - other.year) <= 1):
-                        conf += 0.04
-            res.confidence = min(1.0, conf)
-        elif best_imdb:
-            res.confidence = max(
-                best_imdb.score,
-                0.9 * best_imdb.extra.get("alias_title_score", 0))
-        else:
-            res.confidence = 0.0
-
-        # 主剧名（季条目）
-        base = strip_season_markers(parsed.title) if media_type == "series" else ""
-        needs_ident = (
-            media_type == "series" and base and
-            (base != parsed.title or
-             (parsed.season is not None and parsed.season != 1))
-        )
-        if needs_ident:
-            ident = self._series_identity(base)
-            ident_title = strip_season_markers(
-                ident.get("title") or base) or base
-            # 英文文件名命中了中文季条目时，主剧名优先用中文，
-            # 例如 “科拉传奇 第四季：平衡” -> “科拉传奇”。
-            cn_main = strip_season_and_subtitle(res.title_zh or "")
-            tmdb_main = ""
-            if res.tmdb and RE_CJK.search(res.tmdb.title or "") and \
-                    candidate_season(res.tmdb) is None:
-                tmdb_main = strip_season_markers(res.tmdb.title)
-            if tmdb_main and (
-                    not cn_main or titles_agree(tmdb_main, cn_main) or
-                    titles_agree(tmdb_main, ident_title)) and (
-                    not RE_CJK.search(ident_title) or
-                    len(norm_title(tmdb_main)) >= len(norm_title(ident_title))):
-                ident_title = tmdb_main
-            elif cn_main and RE_CJK.search(cn_main) and \
-                    not RE_CJK.search(ident_title):
-                ident_title = cn_main
-            res.series_title = ident_title
-            years = [ident.get("year")]
-            if res.tmdb:
-                years.append(res.tmdb.year)
-            if res.imdb:
-                years.append(res.imdb.year)
-            years = [y for y in years if y]
-            res.series_year = min(years) if years else res.year
-            res.series_imdb_id = (ident.get("imdb_id") or res.imdb_id or "")
-            if not res.country:
-                res.country = ident.get("country", "") or ""
-            res.animation = res.animation or bool(ident.get("animation"))
-            res.is_season_entry = True
-        elif media_type == "series":
-            raw_title = res.title_zh or res.title_original or parsed.title
-            res.series_title = strip_season_markers(raw_title) or raw_title
-            res.series_year = res.year
-            res.series_imdb_id = res.imdb_id
-        else:
-            res.series_title = res.title_zh or res.title_original or parsed.title
-            res.series_year = res.year
-
-        # 同一部剧的不同季必须使用同一个主剧名。TMDB 的 TV 条目是整部剧，
-        # 标题最稳定；S01/S02/S03 不再出现“中文名 / 中文名+英文 / 带发布组”
-        # 三种写法。
-        if media_type == "series" and res.tmdb and \
-                candidate_season(res.tmdb) is None:
-            tmdb_title = strip_season_markers(res.tmdb.title or "")
-            if tmdb_title and RE_CJK.search(tmdb_title) and (
-                    not res.series_title or
-                    not RE_CJK.search(res.series_title) or
-                    titles_agree(tmdb_title, res.series_title)):
-                res.series_title = tmdb_title
-
-        res.alternatives = sorted(
-            [c for c in dedupe(bangumi_all + douban_all + imdb_all + tmdb_all)
-             if c.extra.get("title_score", 0) >= 0.45],
-            key=lambda c: c.score, reverse=True)[:8]
-
-        if not primary and not best_imdb:
-            res.notes.append("没有找到匹配，请手动输入标题或改用原名搜索。")
-        elif res.confidence < 0.55:
-            res.notes.append("匹配置信度较低，请检查标题/年份或手动修正。")
-        if media_type == "series" and res.is_season_entry and not res.series_year:
-            res.notes.append("已还原主剧名，但没找到首播年份。")
+    def match(self, parsed: ParsedName, media_type: str,
+              category: str = "") -> MatchResult:
+        queries, pools = self.search_pool(parsed, media_type)
+        if not queries:
+            res = MatchResult()
+            res.notes.append("搜索词太短（单字或容器名），已跳过自动搜索；"
+                             "请右键任务使用“手动搜索”。")
+            return res
+        res = decider.decide(parsed, media_type, category, pools, self.log)
+        decider.identify_series(parsed, media_type, res,
+                                self._series_identity)
         return res

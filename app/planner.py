@@ -19,6 +19,7 @@ from typing import Callable, Optional
 
 from rapidfuzz import fuzz
 
+from . import qc
 from .episode_versions import analyze_episode_versions
 from .metadata import (extract_latin_aliases, has_kana, norm_title,
                        strong_titles_agree, strip_season_and_subtitle,
@@ -1083,6 +1084,20 @@ class Planner:
             parts.append(note)
         plan.note = "；".join(dict.fromkeys(parts))
 
+    @staticmethod
+    def _mark(plan: PlanItem, result: "qc.QcResult") -> None:
+        """记录一条结构化检查结果，并按严重度更新 status。
+
+        - 原来“自动”的任务遇到警告/阻断 → 需确认；
+        - 已经“跳过”的保持跳过（没有可改名项），但原因仍会记录。
+        """
+        if result.code not in plan.qc_codes:
+            plan.qc_codes.append(result.code)
+        if plan.status == "auto" and result.severity in (qc.WARN, qc.BLOCK):
+            plan.status = "review"
+        if result.message and result.message not in (plan.note or ""):
+            Planner._append_note(plan, result.message)
+
     def _apply_folder_versions(self, plans: list[PlanItem]) -> None:
         """同一部剧/电影的多个版本目录：主目录原名，额外目录标 V2/V3。
 
@@ -2116,6 +2131,7 @@ class Planner:
             p.status = "review"
             p.note = "没有识别出剧名，请手动填写。"
             p.selected = False
+            self._mark(p, qc.NO_TITLE)
             return p
         # 原目录/文件名里已有的 IMDb/TMDB 号：先用它解析标题和年份
         ex_imdb, ex_tmdb = self._existing_ids(mr, entries, parsed.title)
@@ -2192,6 +2208,7 @@ class Planner:
             p.selected = False
             p.note = ("没有联网获取到剧集标题，已跳过改名；"
                       "请检查网络或使用手动搜索。")
+            self._mark(p, qc.NO_ONLINE_TITLE)
             return p
         title = strip_season_markers(_strip_trailing_year(title, year))
         self._repair_tmdb(match, title)
@@ -2229,6 +2246,10 @@ class Planner:
         else:
             p.status = "auto"
         p.note = "；".join(dict.fromkeys(notes))
+        if conflict_note:
+            self._mark(p, qc.SEASON_TITLE_CONFLICT)
+        if match.confidence < self.options.min_auto_confidence:
+            self._mark(p, qc.LOW_CONFIDENCE)
 
         self.rebuild(p)
         return p
@@ -2250,6 +2271,7 @@ class Planner:
             p.status = "review"
             p.note = "没有识别出电影名，请手动填写。"
             p.selected = False
+            self._mark(p, qc.NO_TITLE)
             return p
         # ID 只用于查元数据；后面的 _movie_ops 仍按电影规则生成改名操作
         ex_imdb, ex_tmdb = self._existing_ids(mr, videos, parsed.title)
@@ -2295,6 +2317,8 @@ class Planner:
             notes.append(match.trace)
         p.status = "auto" if match.confidence >= self.options.min_auto_confidence else "review"
         p.note = "；".join(dict.fromkeys(notes))
+        if match.confidence < self.options.min_auto_confidence:
+            self._mark(p, qc.LOW_CONFIDENCE)
         self.rebuild(p)
         return p
 
@@ -2832,6 +2856,7 @@ class Planner:
                     "请核对。")
                 if plan.status == "auto":
                     plan.status = "review"
+                self._mark(plan, qc.SPECIAL_ZERO_GUESSED)
             if not zero_ep:
                 zero_ep = 1
                 notes.append(
@@ -2839,6 +2864,7 @@ class Planner:
                     "请用“季集映射…”核对。")
                 if plan.status == "auto":
                     plan.status = "review"
+                self._mark(plan, qc.SPECIAL_ZERO_GUESSED)
             for e in zero:
                 e.special_zero = True
                 apply(e, zero_ep)
@@ -2899,6 +2925,7 @@ class Planner:
                 "已按文件名顺序补为 S00Exx，请用“季集映射…”核对。")
             if plan.status == "auto":
                 plan.status = "review"
+            self._mark(plan, qc.SPECIAL_UNMATCHED)
 
     def _series_ops(self, plan: PlanItem, mr: MediaRoot,
                     videos: list[FileEntry], sidecars: list[FileEntry],
@@ -3081,6 +3108,7 @@ class Planner:
             version_notes.append("疑似重复/错集不会自动勾选，请核对后再改名。")
             if plan.status == "auto":
                 plan.status = "review"
+            self._mark(plan, qc.DUPLICATE_EPISODES)
             plan.duplicate_review = True
         elif plan.duplicate_review:
             # 用户通过季集映射修正后，恢复原来自动状态。
@@ -3144,6 +3172,7 @@ class Planner:
             ops = [o for o in ops if o.role in ("show", "season")]
             plan.selected = False
             plan.status = "review"
+            self._mark(plan, qc.SEASON_UNCONFIRMED)
         return ops, notes
 
     def _movie_ops(self, plan: PlanItem, mr: MediaRoot,

@@ -201,6 +201,9 @@ class PlanItem:
     note: str = ""
     ops: list[RenameOp] = field(default_factory=list)
     selected: bool = True
+    # 结构化的“为什么需要确认/跳过”：QcResult 列表（见 app/qc.py）。
+    # status/note 仍保留给既有界面使用，两者由 planner 同步维护。
+    qc_codes: list[str] = field(default_factory=list)
 
     # 命名分类：jp_anime（简洁）/ cn_anime / tv（带规格）/ movie
     category: str = "auto"
