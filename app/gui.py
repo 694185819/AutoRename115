@@ -8,6 +8,7 @@ import json
 import os
 import queue
 import re
+import tempfile
 import threading
 import time
 import tkinter as tk
@@ -16,7 +17,7 @@ from tkinter import messagebox, ttk
 
 from PIL import Image, ImageTk
 
-from . import nfo
+from . import nfo, updater
 from .episode_mapping import EpisodeMappingDialog
 from .manual_search import SOURCE_LABELS, ManualSearchDialog
 from .metadata import (MetadataClient, cn_season_number, norm_title,
@@ -2896,6 +2897,196 @@ class CookieDialog(tk.Toplevel):
         self.msg.configure(text=msg, foreground="#b3261e")
 
 
+class AboutDialog(tk.Toplevel):
+    """版本、仓库和在线更新入口。"""
+
+    def __init__(self, app: App):
+        super().__init__(app)
+        self.app = app
+        self._checking = False
+        self._downloading = False
+        self._release = None
+        self.title("关于 AutoRename115")
+        self.resizable(False, False)
+        self.transient(app)
+        app._center_window(self, 620, 430, parent=app)
+        self.grab_set()
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+
+        frame = ttk.Frame(self, padding=18)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text="115 海报墙重命名助手",
+                  font=("Microsoft YaHei UI", 15, "bold")).pack(anchor="w")
+        self.version_label = ttk.Label(
+            frame, text=f"版本 {updater.APP_VERSION}",
+            foreground="#176b33")
+        self.version_label.pack(anchor="w", pady=(4, 10))
+        repo_row = ttk.Frame(frame)
+        repo_row.pack(anchor="w", pady=(0, 10))
+        ttk.Label(repo_row, text="GitHub 仓库：").pack(side="left")
+        self.repo_link = ttk.Label(
+            repo_row, text=updater.REPO_URL, foreground="#0563c1",
+            cursor="hand2", font=("Microsoft YaHei UI", 9, "underline"))
+        self.repo_link.pack(side="left")
+        self.repo_link.bind("<Button-1>", self._open_repo)
+        self.repo_link.bind("<Return>", self._open_repo)
+        self.repo_link.bind("<space>", self._open_repo)
+        self.repo_link.configure(takefocus=True)
+        ttk.Label(
+            frame,
+            text="在线更新：从 GitHub Release 下载便携包，退出后覆盖当前程序目录；"
+                 "登录数据 data/ 会保留。更新完成后程序会自动重新打开。",
+            foreground="#555", wraplength=570, justify="left").pack(
+                anchor="w", pady=(0, 10))
+        ttk.Separator(frame).pack(fill="x", pady=6)
+        self.status_var = tk.StringVar(value="可以检查 GitHub 上的最新版本。")
+        ttk.Label(frame, textvariable=self.status_var, foreground="#555",
+                  wraplength=570, justify="left").pack(anchor="w", pady=(4, 12))
+        btns = ttk.Frame(frame)
+        btns.pack(side="bottom", fill="x")
+        self.check_btn = ttk.Button(btns, text="检查更新",
+                                    command=self.check_update)
+        self.check_btn.pack(side="left")
+        ttk.Button(btns, text="打开仓库",
+                   command=self._open_repo).pack(side="left", padx=6)
+        ttk.Button(btns, text="关闭", command=self.destroy).pack(side="right")
+
+    def _open_repo(self, event=None) -> str:
+        try:
+            opened = webbrowser.open(updater.REPO_URL)
+        except Exception:
+            opened = False
+        if not opened:
+            messagebox.showinfo(
+                "GitHub 仓库", f"请手动打开：\n{updater.REPO_URL}",
+                parent=self)
+        return "break"
+
+    def check_update(self) -> None:
+        if self._checking or self._downloading:
+            return
+        self._checking = True
+        self.check_btn.configure(state="disabled")
+        self.status_var.set("正在检查 GitHub 最新版本…")
+
+        def worker():
+            try:
+                release = updater.fetch_latest_release()
+                err = ""
+            except Exception as e:  # noqa: BLE001
+                release, err = None, str(e)
+            try:
+                self.after(0, lambda r=release, e=err: self._check_done(r, e))
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _check_done(self, release, error: str) -> None:
+        if not self.winfo_exists():
+            return
+        self._checking = False
+        self.check_btn.configure(state="normal")
+        if error:
+            self.status_var.set(f"检查更新失败：{error}")
+            return
+        self._release = release
+        tag = str(release.get("tag") or "")
+        if not updater.is_newer(tag, updater.APP_VERSION):
+            self.status_var.set(
+                f"当前已是最新版本（{updater.APP_VERSION}）。")
+            return
+        notes = str(release.get("notes") or "").strip()
+        detail = f"\n\n{notes[:400]}" if notes else ""
+        if not messagebox.askyesno(
+                "发现新版本",
+                f"发现新版本 {tag}（当前 {updater.APP_VERSION}）。"
+                f"{detail}\n\n是否下载并覆盖更新？",
+                parent=self):
+            self.status_var.set(f"发现新版本 {tag}，已取消下载。")
+            return
+        self._start_download(release)
+
+    def _start_download(self, release) -> None:
+        self._downloading = True
+        self._release = release
+        self.check_btn.configure(state="disabled")
+        tag = re.sub(r"[^0-9A-Za-z._-]+", "_",
+                     str(release.get("tag") or "latest"))
+        path = os.path.join(
+            tempfile.gettempdir(), f"AutoRename115-update-{tag}.zip")
+        self.status_var.set("正在下载更新包…")
+        last = {"pct": -1}
+
+        def progress(done: int, total: int) -> None:
+            if total > 0:
+                pct = int(done * 100 / total)
+                if pct == last["pct"]:
+                    return
+                last["pct"] = pct
+                text = f"正在下载更新包… {pct}%（{done // 1024} KB）"
+            else:
+                text = f"正在下载更新包… {done // 1024} KB"
+            try:
+                self.after(0, lambda t=text: self.status_var.set(t))
+            except Exception:
+                pass
+
+        def worker():
+            try:
+                updater.download_asset(release["asset"], path, progress)
+                err = ""
+            except Exception as e:  # noqa: BLE001
+                path2, err = "", str(e)
+            else:
+                path2 = path
+            try:
+                self.after(0, lambda p=path2, e=err:
+                           self._download_done(p, e))
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _download_done(self, path: str, error: str) -> None:
+        if not self.winfo_exists():
+            return
+        self._downloading = False
+        self.check_btn.configure(state="normal")
+        if error:
+            self.status_var.set(f"下载更新失败：{error}")
+            return
+        tag = str((self._release or {}).get("tag") or "")
+        self.status_var.set(f"更新包已下载：{tag}")
+        if not updater.can_self_update(self.app.app_dir):
+            messagebox.showinfo(
+                "更新包已下载",
+                "当前是源码运行，或程序目录不可写，不能自动覆盖。\n\n"
+                f"更新包：{path}\n"
+                f"也可以打开仓库手动下载：\n{updater.RELEASES_URL}",
+                parent=self)
+            return
+        if not messagebox.askyesno(
+                "安装更新",
+                "将关闭当前程序，用新版本覆盖程序目录，保留 data/，"
+                "然后自动重新打开。\n\n是否继续？",
+                parent=self):
+            self.status_var.set("已取消安装更新。")
+            return
+        try:
+            updater.launch_self_update(path, self.app.app_dir)
+        except Exception as e:  # noqa: BLE001
+            self.status_var.set(f"启动更新失败：{e}")
+            return
+        messagebox.showinfo(
+            "正在更新",
+            "程序即将关闭并覆盖更新，完成后会自动重新打开。\n"
+            "如果更新失败，请查看 data/update.log。",
+            parent=self)
+        self.destroy()
+        self.app.after(150, self.app.destroy)
+
+
 class SettingsDialog(tk.Toplevel):
     def __init__(self, app: App):
         super().__init__(app)
@@ -2991,8 +3182,12 @@ class SettingsDialog(tk.Toplevel):
                   wraplength=520, foreground="#555").pack(anchor="w", pady=(8, 0))
         btns = ttk.Frame(frame)
         btns.pack(side="bottom", fill="x", pady=(16, 0))
+        ttk.Button(btns, text="关于…", command=self.open_about).pack(side="left")
         ttk.Button(btns, text="保存", command=self.save).pack(side="right", padx=4)
         ttk.Button(btns, text="取消", command=self.destroy).pack(side="right")
+
+    def open_about(self) -> None:
+        AboutDialog(self.app)
 
     def _open_tmdb_api(self, event=None) -> str:
         url = "https://www.themoviedb.org/settings/api"

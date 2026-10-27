@@ -4,7 +4,8 @@ import traceback
 
 sys.path.insert(0, r"I:\实验\AutoRename115")
 import app.gui as gui
-from app.gui import App
+from app.gui import AboutDialog, App
+from app import updater
 
 warnings = []
 gui.messagebox.showwarning = lambda *a, **k: warnings.append(
@@ -69,6 +70,13 @@ assert "Expecting value" not in warnings[-1], warnings
 app._set_busy(False)
 assert int(float(app.progress.cget("value"))) == 0
 assert app.progress_stage.cget("text") == ""
+
+# 关于窗口显示版本和仓库地址
+about = AboutDialog(app)
+app.update()
+assert "0.1" in about.version_label.cget("text")
+assert updater.REPO_URL in about.repo_link.cget("text")
+about.destroy()
 
 app.after(2500, app.destroy)
 app.mainloop()
