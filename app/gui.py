@@ -2906,6 +2906,7 @@ class AboutDialog(tk.Toplevel):
         self._checking = False
         self._downloading = False
         self._release = None
+        self._events: queue.Queue = queue.Queue()
         self.title("关于 AutoRename115")
         self.resizable(False, False)
         self.transient(app)
@@ -2950,6 +2951,28 @@ class AboutDialog(tk.Toplevel):
         ttk.Button(btns, text="打开仓库",
                    command=self._open_repo).pack(side="left", padx=6)
         ttk.Button(btns, text="关闭", command=self.destroy).pack(side="right")
+        self.after(100, self._poll_events)
+
+    def _post_event(self, fn, *args) -> None:
+        """后台线程只能投递事件，Tk 控件只由主线程操作。"""
+        self._events.put((fn, args))
+
+    def _poll_events(self) -> None:
+        try:
+            if not self.winfo_exists():
+                return
+            while True:
+                try:
+                    fn, args = self._events.get_nowait()
+                except queue.Empty:
+                    break
+                try:
+                    fn(*args)
+                except Exception:
+                    pass
+            self.after(100, self._poll_events)
+        except Exception:
+            pass
 
     def _open_repo(self, event=None) -> str:
         try:
@@ -2975,10 +2998,7 @@ class AboutDialog(tk.Toplevel):
                 err = ""
             except Exception as e:  # noqa: BLE001
                 release, err = None, str(e)
-            try:
-                self.after(0, lambda r=release, e=err: self._check_done(r, e))
-            except Exception:
-                pass
+            self._post_event(self._check_done, release, err)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -3027,10 +3047,7 @@ class AboutDialog(tk.Toplevel):
                 text = f"正在下载更新包… {pct}%（{done // 1024} KB）"
             else:
                 text = f"正在下载更新包… {done // 1024} KB"
-            try:
-                self.after(0, lambda t=text: self.status_var.set(t))
-            except Exception:
-                pass
+            self._post_event(self._set_status, text)
 
         def worker():
             try:
@@ -3040,13 +3057,15 @@ class AboutDialog(tk.Toplevel):
                 path2, err = "", str(e)
             else:
                 path2 = path
-            try:
-                self.after(0, lambda p=path2, e=err:
-                           self._download_done(p, e))
-            except Exception:
-                pass
+            self._post_event(self._download_done, path2, err)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _set_status(self, text: str) -> None:
+        try:
+            self.status_var.set(text)
+        except Exception:
+            pass
 
     def _download_done(self, path: str, error: str) -> None:
         if not self.winfo_exists():
