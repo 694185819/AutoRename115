@@ -33,6 +33,10 @@ from .planner import (CATEGORY_LABELS, NamingOptions, Planner, _usable_query,
 from .undo import UndoManager
 
 APP_TITLE = "115 海报墙重命名助手"
+# 启动后自动检查一次；运行期间每 2 小时再检查一次。只访问 GitHub，
+# 失败时静默记录，不打断正在进行的扫描/改名。
+AUTO_UPDATE_DELAY_MS = 5000
+AUTO_UPDATE_PERIOD_SECONDS = 2 * 60 * 60
 ROLE_LABELS = {
     "show": "剧集文件夹",
     "season": "季目录",
@@ -76,6 +80,9 @@ DEFAULT_SETTINGS = {
     "douban_delay": 2.2,
     "login_app": "ios",
     "local_root": "",
+    "auto_check_updates": True,
+    "update_ignored_version": "",
+    "update_last_check": 0,
     # 首次使用（还没有 Cookie）时显示 115 风控提醒；勾选“只显示一次”后
     # 这里变为 True，下次启动不再打扰。
     "risk_notice_dismissed": False,
@@ -140,6 +147,10 @@ class App(tk.Tk):
         self.is_demo = False
         self.is_local = False
         self.busy = False
+        self._update_checking = False
+        self._update_release: dict | None = None
+        self._update_after_id: str | None = None
+        self._update_banner_tag = ""
         self.q: queue.Queue = queue.Queue()
         self.plans: list[PlanItem] = []
         self.plan_rows: dict[str, PlanItem] = {}
@@ -156,6 +167,8 @@ class App(tk.Tk):
         self._build_ui()
         self.after(100, self._poll_queue)
         self.after(250, self._startup)
+        if bool(self.settings.get("auto_check_updates", True)):
+            self._schedule_update_check(AUTO_UPDATE_DELAY_MS)
 
     # ------------------------------------------------------------ 基础
     def _load_settings(self) -> dict:
@@ -248,6 +261,7 @@ class App(tk.Tk):
         # 顶部
         top = ttk.Frame(self, padding=(8, 6))
         top.pack(fill="x")
+        self.top_bar = top
         ttk.Label(top, text=APP_TITLE,
                   font=("Microsoft YaHei UI", 13, "bold")).pack(side="left")
         self.login_label = ttk.Label(top, text="未登录", foreground="#888")
@@ -262,6 +276,22 @@ class App(tk.Tk):
         self.login_btn = ttk.Button(top, text="登录 115",
                                     command=self.open_login)
         self.login_btn.pack(side="right", padx=3)
+
+        # 更新提示条：发现新版本后从顶部推出来，不阻塞当前操作。
+        self.update_banner = tk.Frame(
+            self, background="#fff3cd", highlightthickness=0, bd=0)
+        self.update_banner_label = tk.Label(
+            self.update_banner, text="", background="#fff3cd",
+            foreground="#7a4f00", anchor="w", justify="left",
+            font=("Microsoft YaHei UI", 9), padx=10)
+        self.update_banner_label.pack(
+            side="left", fill="x", expand=True, pady=5)
+        ttk.Button(self.update_banner, text="忽略此版本",
+                   command=self._ignore_update).pack(
+                       side="right", padx=(4, 8), pady=3)
+        ttk.Button(self.update_banner, text="查看更新",
+                   command=self.open_update_notice).pack(
+                       side="right", pady=3)
 
         # 主体
         paned = ttk.Panedwindow(self, orient="horizontal")
@@ -737,6 +767,9 @@ class App(tk.Tk):
             self._show_task_error(payload)
         elif kind == "status":
             self.status_var.set(str(payload))
+        elif kind == "update_check":
+            release, error = payload
+            self._on_update_result(release, error)
         elif kind == "media_details":
             self._show_media_details(*payload)
         elif kind == "nfo_save":
@@ -1018,6 +1051,116 @@ class App(tk.Tk):
         if self.is_demo:
             return "demo"
         return "cloud"
+
+    # ------------------------------------------------------------ 自动更新
+    def _schedule_update_check(self, delay_ms: int) -> None:
+        if self._update_after_id:
+            try:
+                self.after_cancel(self._update_after_id)
+            except Exception:
+                pass
+        self._update_after_id = self.after(
+            max(1000, int(delay_ms)), self._auto_update_tick)
+
+    def _auto_update_tick(self) -> None:
+        """启动后自动查一次；运行期间按周期再查，结果只做顶部提示。"""
+        self._update_after_id = None
+        if not bool(self.settings.get("auto_check_updates", True)):
+            return
+        if self._update_checking:
+            self._schedule_update_check(AUTO_UPDATE_PERIOD_SECONDS * 1000)
+            return
+        # 测试/后台窗口不发起网络请求，避免无窗口时弹更新提示。
+        try:
+            if not self.winfo_viewable():
+                self._schedule_update_check(
+                    AUTO_UPDATE_PERIOD_SECONDS * 1000)
+                return
+        except Exception:
+            return
+        self._update_checking = True
+        self.settings["update_last_check"] = int(time.time())
+        try:
+            self._save_settings()
+        except Exception:
+            pass
+
+        def worker():
+            try:
+                release = updater.fetch_latest_release()
+                error = ""
+            except Exception as e:  # noqa: BLE001
+                release, error = None, str(e)
+            self.post("update_check", (release, error))
+
+        threading.Thread(target=worker, daemon=True).start()
+        self._schedule_update_check(AUTO_UPDATE_PERIOD_SECONDS * 1000)
+
+    def _on_update_result(self, release, error: str) -> None:
+        self._update_checking = False
+        if error:
+            short = str(error).replace("\n", " ")[:160]
+            self._log(f"自动检查更新未完成（不影响使用）：{short}")
+            return
+        if not isinstance(release, dict):
+            return
+        if not bool(self.settings.get("auto_check_updates", True)):
+            return
+        tag = str(release.get("tag") or "")
+        if not tag or not updater.is_newer(tag, updater.APP_VERSION):
+            return
+        ignored = str(self.settings.get("update_ignored_version") or "")
+        if tag == ignored:
+            return
+        self._update_release = release
+        self._show_update_banner(release)
+        self._log(f"发现新版本 {tag}（当前 {updater.APP_VERSION}），"
+                  "已显示顶部更新提示。")
+
+    def _show_update_banner(self, release: dict) -> None:
+        tag = str(release.get("tag") or "")
+        notes = str(release.get("notes") or "").strip().splitlines()
+        detail = notes[0].strip() if notes else ""
+        detail = re.sub(r"^[#*\-\s]+", "", detail)[:70]
+        text = (f"发现新版本 {tag}（当前 {updater.APP_VERSION}）"
+                + (f"：{detail}" if detail else ""))
+        self._update_banner_tag = tag
+        self.update_banner_label.configure(text=text)
+        if not self.update_banner.winfo_manager():
+            self.update_banner.pack(fill="x", after=self.top_bar)
+
+    def _hide_update_banner(self) -> None:
+        try:
+            self.update_banner.pack_forget()
+        except Exception:
+            pass
+
+    def _ignore_update(self) -> None:
+        tag = self._update_banner_tag
+        if tag:
+            self.settings["update_ignored_version"] = tag
+            try:
+                self._save_settings()
+            except Exception:
+                pass
+            self._log(f"已忽略版本 {tag} 的更新提示；仍可在“关于”中手动检查。")
+        self._hide_update_banner()
+
+    def open_update_notice(self) -> None:
+        AboutDialog(self, release=self._update_release)
+
+    def _sync_update_schedule(self) -> None:
+        if not bool(self.settings.get("auto_check_updates", True)):
+            if self._update_after_id:
+                try:
+                    self.after_cancel(self._update_after_id)
+                except Exception:
+                    pass
+                self._update_after_id = None
+            self._hide_update_banner()
+            return
+        if not self._update_after_id:
+            self._schedule_update_check(3000)
 
     # ------------------------------------------------------------ 目录
     @staticmethod
@@ -2940,6 +3083,7 @@ class App(tk.Tk):
         self._save_settings()
         self._init_meta()
         self.nfo_mode_label.configure(text=self._nfo_mode_text())
+        self._sync_update_schedule()
         self._log("设置已保存。")
 
 
@@ -3153,7 +3297,7 @@ class CookieDialog(tk.Toplevel):
 class AboutDialog(tk.Toplevel):
     """版本、仓库和在线更新入口。"""
 
-    def __init__(self, app: App):
+    def __init__(self, app: App, release: dict | None = None):
         super().__init__(app)
         self.app = app
         self._checking = False
@@ -3216,10 +3360,16 @@ class AboutDialog(tk.Toplevel):
         self.check_btn = ttk.Button(btns, text="检查更新",
                                     command=self.check_update)
         self.check_btn.pack(side="left")
+        self.install_btn = ttk.Button(
+            btns, text="下载并安装", command=self._install_available,
+            state="disabled")
+        self.install_btn.pack(side="left", padx=6)
         ttk.Button(btns, text="打开仓库",
-                   command=self._open_repo).pack(side="left", padx=6)
+                   command=self._open_repo).pack(side="left")
         ttk.Button(btns, text="关闭", command=self.destroy).pack(side="right")
         self.after(100, self._poll_events)
+        if release:
+            self._apply_available_release(release)
 
     def _post_event(self, fn, *args) -> None:
         """后台线程只能投递事件，Tk 控件只由主线程操作。"""
@@ -3272,6 +3422,37 @@ class AboutDialog(tk.Toplevel):
                 parent=self)
         return "break"
 
+    def _apply_available_release(self, release: dict) -> bool:
+        tag = str(release.get("tag") or "")
+        if not tag or not updater.is_newer(tag, updater.APP_VERSION):
+            self._release = None
+            self.install_btn.configure(text="下载并安装", state="disabled")
+            return False
+        self._release = release
+        self.install_btn.configure(
+            text=f"下载并安装 {tag}", state="normal")
+        notes = str(release.get("notes") or "").strip().splitlines()
+        detail = re.sub(r"^[#*\-\s]+", "",
+                        notes[0].strip())[:80] if notes else ""
+        self.status_var.set(
+            f"发现新版本 {tag}（当前 {updater.APP_VERSION}）。"
+            + (f" {detail}" if detail else "")
+            + " 可点击“下载并安装”。")
+        return True
+
+    def _install_available(self) -> None:
+        if self._checking or self._downloading or not self._release:
+            return
+        tag = str(self._release.get("tag") or "")
+        if not messagebox.askyesno(
+                "下载更新",
+                f"现在下载新版本 {tag}？\n"
+                "下载完成后会询问是否关闭程序并覆盖更新；"
+                "登录数据 data/ 会保留。",
+                parent=self):
+            return
+        self._start_download(self._release)
+
     def check_update(self) -> None:
         if self._checking or self._downloading:
             return
@@ -3297,20 +3478,20 @@ class AboutDialog(tk.Toplevel):
         if error:
             self.status_var.set(f"检查更新失败：{error}")
             return
-        self._release = release
-        tag = str(release.get("tag") or "")
-        if not updater.is_newer(tag, updater.APP_VERSION):
+        if not self._apply_available_release(release):
             self.status_var.set(
                 f"当前已是最新版本（{updater.APP_VERSION}）。")
             return
+        tag = str(release.get("tag") or "")
         notes = str(release.get("notes") or "").strip()
         detail = f"\n\n{notes[:400]}" if notes else ""
         if not messagebox.askyesno(
                 "发现新版本",
                 f"发现新版本 {tag}（当前 {updater.APP_VERSION}）。"
-                f"{detail}\n\n是否下载并覆盖更新？",
+                f"{detail}\n\n是否现在下载并覆盖更新？",
                 parent=self):
-            self.status_var.set(f"发现新版本 {tag}，已取消下载。")
+            self.status_var.set(
+                f"发现新版本 {tag}，可点击“下载并安装 {tag}”。")
             return
         self._start_download(release)
 
@@ -3318,6 +3499,7 @@ class AboutDialog(tk.Toplevel):
         self._downloading = True
         self._release = release
         self.check_btn.configure(state="disabled")
+        self.install_btn.configure(state="disabled")
         tag = re.sub(r"[^0-9A-Za-z._-]+", "_",
                      str(release.get("tag") or "latest"))
         path = os.path.join(
@@ -3360,6 +3542,7 @@ class AboutDialog(tk.Toplevel):
         self._downloading = False
         self.check_btn.configure(state="normal")
         if error:
+            self.install_btn.configure(state="normal")
             self.status_var.set(f"下载更新失败：{error}")
             return
         tag = str((self._release or {}).get("tag") or "")
@@ -3465,7 +3648,7 @@ class SettingsDialog(tk.Toplevel):
         self.title("设置")
         self.resizable(False, False)
         self.transient(app)
-        app._center_window(self, 560, 570, parent=app)
+        app._center_window(self, 560, 610, parent=app)
         self.grab_set()
         s = app.settings
         self.vars = {
@@ -3473,6 +3656,8 @@ class SettingsDialog(tk.Toplevel):
             "rename_subtitles": tk.BooleanVar(value=bool(s.get("rename_subtitles", True))),
             "rename_season_folders": tk.BooleanVar(value=bool(s.get("rename_season_folders", True))),
             "use_bangumi": tk.BooleanVar(value=bool(s.get("use_bangumi", True))),
+            "auto_check_updates": tk.BooleanVar(
+                value=bool(s.get("auto_check_updates", True))),
         }
         frame = ttk.Frame(self, padding=14)
         frame.pack(fill="both", expand=True)
@@ -3511,6 +3696,10 @@ class SettingsDialog(tk.Toplevel):
                         variable=self.vars["rename_season_folders"]).pack(anchor="w", pady=3)
         ttk.Checkbutton(frame, text="使用 Bangumi 辅助识别日番/国产动画/美漫",
                         variable=self.vars["use_bangumi"]).pack(anchor="w", pady=3)
+        ttk.Checkbutton(
+            frame,
+            text="启动和运行中自动检查更新（只访问 GitHub，失败不打扰）",
+            variable=self.vars["auto_check_updates"]).pack(anchor="w", pady=3)
         nfo_row = ttk.Frame(frame)
         nfo_row.pack(anchor="w", pady=3)
         ttk.Label(nfo_row, text="已有 NFO/图片").pack(side="left")
@@ -3578,6 +3767,8 @@ class SettingsDialog(tk.Toplevel):
             "rename_season_folders": bool(self.vars["rename_season_folders"].get()),
             "nfo_existing": self.nfo_mode_var.get(),
             "use_bangumi": bool(self.vars["use_bangumi"].get()),
+            "auto_check_updates": bool(
+                self.vars["auto_check_updates"].get()),
             "imdb_id_style": self.style_var.get(),
             "id_provider": self.provider_var.get(),
             "jp_folder_style": JP_LABEL_TO_KEY.get(
