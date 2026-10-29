@@ -60,6 +60,16 @@ SHORT_CATEGORY = {
     "us_anime": "美漫", "west_anime": "欧美",
     "tv": "电视剧", "movie": "电影",
 }
+# 豆瓣 Cookie 的获取提示与填空模板（设置里直接展示，降低上手门槛）
+DOUBAN_COOKIE_HINT = (
+    "获取方式：Chrome 打开 movie.douban.com 并登录 → F12 → "
+    "Application（应用）→ Cookies → https://movie.douban.com，"
+    "在右侧列表里找到 dbcl2、bid、ck 三项，把它们的值填进上面的框里即可。\n"
+    "格式模板（直接照着填）："
+    "dbcl2=这里填dbcl2的值; bid=这里填bid的值; ck=这里填ck的值"
+)
+DOUBAN_COOKIE_TEMPLATE = (
+    "dbcl2=这里填dbcl2的值; bid=这里填bid的值; ck=这里填ck的值")
 # 日番文件夹格式：设置里只提供两种。历史上还有 bdremux_suffix /
 # bdremux_no_year 两种写法，planner 仍能识别，但不再出现在下拉框中；
 # 旧配置落到这里时按默认“你的风格”处理。
@@ -4424,10 +4434,13 @@ class SettingsDialog(tk.Toplevel):
                   foreground="#555", wraplength=520).pack(anchor="w", pady=(8, 0))
         cookie_row = ttk.Frame(frame)
         cookie_row.pack(fill="x", pady=3)
-        self.douban_cookie_var = tk.StringVar(
-            value=s.get("douban_cookie", ""))
+        # 框里预置拼接模板，用户按提示把值填进去即可
+        default_cookie = str(s.get("douban_cookie", "") or "")
+        if not default_cookie:
+            default_cookie = DOUBAN_COOKIE_TEMPLATE
+        self.douban_cookie_var = tk.StringVar(value=default_cookie)
         ttk.Entry(cookie_row, textvariable=self.douban_cookie_var,
-                  width=44, show="•").pack(side="left")
+                  width=44).pack(side="left")
         ttk.Button(cookie_row, text="打开豆瓣…",
                    command=lambda: webbrowser.open(
                        "https://movie.douban.com/")).pack(side="left", padx=6)
@@ -4436,6 +4449,10 @@ class SettingsDialog(tk.Toplevel):
         self.douban_test_btn = ttk.Button(
             cookie_row, text="测试豆瓣连接", command=self._test_douban_cookie)
         self.douban_test_btn.pack(side="left", padx=6)
+        # 获取提示：告诉用户去哪里复制、按什么格式拼接
+        ttk.Label(frame, text=DOUBAN_COOKIE_HINT,
+                  foreground="#777", wraplength=520,
+                  justify="left").pack(anchor="w", pady=(2, 0))
         self.douban_test_label = ttk.Label(frame, text="", foreground="#777")
         self.douban_test_label.pack(anchor="w")
         # 命名规则已移到主界面（可折叠区块），这里不再重复放置。

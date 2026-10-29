@@ -292,8 +292,12 @@ class SettingsDialog(QDialog):
         note.setStyleSheet("color:#777;")
         f2.addWidget(note)
         row = QHBoxLayout()
-        self.edit_cookie = QLineEdit(str(s.get("douban_cookie", "") or ""))
-        self.edit_cookie.setEchoMode(QLineEdit.Password)
+        # 框里预置拼接模板，用户按提示把三项值填进去即可
+        cookie_text = str(s.get("douban_cookie", "") or "")
+        if not cookie_text:
+            from app.gui import DOUBAN_COOKIE_TEMPLATE as _T
+            cookie_text = _T
+        self.edit_cookie = QLineEdit(cookie_text)
         row.addWidget(self.edit_cookie, 1)
         btn_paste = QPushButton("从剪贴板粘贴")
         btn_open = QPushButton("打开豆瓣…")
@@ -302,6 +306,12 @@ class SettingsDialog(QDialog):
         row.addWidget(btn_open)
         row.addWidget(btn_test)
         f2.addLayout(row)
+        # 获取提示：写在输入框下面
+        from app.gui import DOUBAN_COOKIE_HINT as _H
+        hint = QLabel(_H)
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#777;")
+        f2.addWidget(hint)
         self.lbl_douban = QLabel("")
         self.lbl_douban.setWordWrap(True)
         f2.addWidget(self.lbl_douban)
