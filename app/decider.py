@@ -207,6 +207,16 @@ def decide(parsed: ParsedName, media_type: str, category: str,
                 (best_bg.original_title if bg_ok else "") or
                 (best_imdb.title if best_imdb else "") or
                 primary.original_title)
+        # 采用的主条目只是“本地标题 + 季/分段后缀”时（例如本地“灵笼”，
+        # 数据源只有“灵笼 上半季”），标题会带上分段名，需要在预览里说清楚，
+        # 否则用户会以为匹配错了。主剧名仍会还原成不带分段的标题。
+        if isinstance(primary.extra, dict) and \
+                not primary.extra.get("title_exact") and \
+                scoring._anchor_suffix_match(parsed, primary):
+            res.notes.append(
+                f"数据源没有与「{parsed.title}」完全同名的条目，"
+                f"暂用「{primary.title}」（分段/季条目）；"
+                "主剧名会还原为不带分段的名字，请核对。")
     elif best_imdb:
         res.title_zh = best_imdb.title
         res.title_original = best_imdb.title

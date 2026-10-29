@@ -155,11 +155,64 @@ def candidate_matches_anchor(cand: Candidate, anchors: list[str]) -> bool:
                 continue
             if cn == an:
                 return True
+            # 短标题（2 字）不能靠任意包含关系命中，但允许“标题 + 季/分段后缀”，
+            # 否则“灵笼”会漏掉“灵笼 上半季 / 灵笼 第二季”这种同系列条目。
+            if len(an) >= 2 and cn.startswith(an) and \
+                    _is_suffix_only(cn[len(an):]):
+                return True
             if len(an) < 3:
                 continue
             if titles_agree(name, anchor):
                 return True
-            if an in cn and len(an) >= 3:
+            if an in cn:
+                return True
+    return False
+
+
+_SEASON_SUFFIX_WORDS = (
+    "季", "期", "部", "章", "中章", "上章", "下章", "终章", "序章",
+    "上半", "下半", "上卷", "下卷", "篇", "前篇", "后篇",
+    "part", "season", "s", "final", "cour",
+    "上半季", "下半季", "新章", "续章", "精编版", "总集篇", "剧场版",
+    "incarnation", "ova", "oad", "sp",
+)
+
+
+def _is_suffix_only(rest: str) -> bool:
+    """候选名去掉本地名后，剩余部分是否只是季/分段说明。
+
+    rest 已经过 norm_title（去标点、小写）。允许阿拉伯/中文数字与上述词组合，
+    例如“上半季”“第二季”“2”“finalseason”“中章”。
+    """
+    if not rest:
+        return True
+    if len(rest) > 12:
+        return False
+    # 去掉数字与量词“第”后，必须只剩说明词：“第二季”→“季”，“灵笼2”→“”
+    letters = re.sub(r"[0-9一二三四五六七八九十零〇两百]+", "", rest)
+    letters = letters.replace("第", "")
+    if not letters:
+        return True          # 只剩数字，例如“灵笼 2”
+    for word in _SEASON_SUFFIX_WORDS:
+        if letters == word:
+            return True
+        if letters.startswith(word) and \
+                _is_suffix_only(letters[len(word):]):
+            return True
+    return False
+
+
+def _anchor_suffix_match(parsed: ParsedName, cand: Candidate) -> bool:
+    """该候选是否只是“本地标题 + 季/分段后缀”（没有完全同名条目时）。"""
+    anchor_norms = {norm_title(t) for t in
+                    ([parsed.title] + list(parsed.queries or [])) if norm_title(t)}
+    for name in candidate_names(cand):
+        cn = norm_title(name)
+        if not cn or cn in anchor_norms:
+            continue
+        for an in anchor_norms:
+            if len(an) >= 2 and cn.startswith(an) and \
+                    _is_suffix_only(cn[len(an):]):
                 return True
     return False
 
@@ -245,6 +298,10 @@ def score(parsed: ParsedName, cand: Candidate, media_type: str) -> float:
         if len(lp) >= 3)
     cand.extra["anchor_exact"] = int(
         bool(cand_norm_set & local_parts) or contains_local)
+    # “本地标题 + 季/分段后缀”（灵笼 上半季）也算对得上，但它不是同名条目：
+    # 同类候选里要优先选与本地标题完全同名的那条，否则主标题会被带成
+    # “灵笼 上半季”。
+    cand.extra["title_exact"] = int(bool(cand_norm_set & local_parts))
     # 番外/短片：“女子落语 OAD”不能只看 partial 就当成主条目
     if _WEAK_SOURCE_RE.search(cand.title or "") and not exact_title:
         value = max(0.0, value - 0.15)
@@ -281,8 +338,12 @@ def pick_primary(cands: list[Candidate],
         return None
     # 与本地标题完全一致的条目优先，避免高季号/高年份的近似条目
     # 靠模糊分抢走主条目（Jellyfin TMDB provider 也采用这一策略）。
+    # “标题 + 季/分段后缀”虽然也通过锚点，但不能压过完全同名条目。
     exact = [c for c in pool if isinstance(c.extra, dict) and
-             c.extra.get("anchor_exact")]
+             c.extra.get("title_exact")]
+    if not exact:
+        exact = [c for c in pool if isinstance(c.extra, dict) and
+                 c.extra.get("anchor_exact")]
     if exact:
         pool = exact
 

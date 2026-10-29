@@ -37,9 +37,17 @@ def test_weak_anchor_rejected():
 
 
 def test_short_anchor_needs_exact():
-    """2 字锚点只认完全同名，不能靠包含关系命中。"""
+    """2 字锚点：同名可以；带季/分段后缀可以；其它包含关系不行。"""
     assert scoring.candidate_matches_anchor(cand("冰菓"), ["冰菓"])
-    assert not scoring.candidate_matches_anchor(cand("冰菓 第二季"), ["冰菓"])
+    # 同系列的分季/分段条目应当能匹配（否则 2 字标题会漏配）
+    assert scoring.candidate_matches_anchor(cand("冰菓 第二季"), ["冰菓"])
+    assert scoring.candidate_matches_anchor(cand("灵笼 上半季"), ["灵笼"])
+    assert scoring.candidate_matches_anchor(cand("灵笼 中章"), ["灵笼"])
+    # 但不是随便包含：番外、纪录片、无关词仍要被拒绝
+    assert not scoring.candidate_matches_anchor(cand("冰菓番外"), ["冰菓"])
+    assert not scoring.candidate_matches_anchor(cand("灵笼纪录片"), ["灵笼"])
+    assert not scoring.candidate_matches_anchor(cand("灵笼山"), ["灵笼"])
+    assert not scoring.candidate_matches_anchor(cand("冰菓 第二季"), ["冰"])
     # 3 字以上允许“官方名包含本地简称”
     assert scoring.candidate_matches_anchor(
         cand("女子落语 じょしらく"), ["女子落语"])
