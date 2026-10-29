@@ -915,6 +915,17 @@ class MainWindow(QMainWindow):
         for b in (self.btn_analyze_dir, self.btn_analyze_sel, self.btn_preview,
                   self.btn_apply, self.btn_undo):
             lay.addWidget(b)
+        # 逐个接到业务层（Tk 版 App 的对应方法，均无参数）
+        self.btn_analyze_dir.clicked.connect(
+            lambda: _call(self.app, "analyze_current"))
+        self.btn_analyze_sel.clicked.connect(
+            lambda: _call(self.app, "analyze_selected"))
+        self.btn_preview.clicked.connect(
+            lambda: _call(self.app, "preview_ops"))
+        self.btn_apply.clicked.connect(
+            lambda: _call(self.app, "apply_selected"))
+        self.btn_undo.clicked.connect(
+            lambda: _call(self.app, "undo_last"))
         lay.addStretch(1)
         self.btn_manual = QPushButton("手动搜索…")
         self.btn_settings = QPushButton("设置…")
@@ -951,6 +962,29 @@ class MainWindow(QMainWindow):
             return
         ManualSearchDialog(self, self.app, p).exec()
 
+    def open_episode_mapping(self) -> None:
+        p = getattr(self.app, "detail_plan", None)
+        if p is None:
+            QMessageBox.information(self, "季集映射", "请先选择一个任务。")
+            return
+        if getattr(p, "media_type", "") != "series":
+            QMessageBox.information(self, "季集映射",
+                                    "只有剧集任务可以设置季集映射。")
+            return
+        EpisodeMappingDialog(self, self.app, p).exec()
+
+    def _on_auto_nfo_toggled(self, checked: bool) -> None:
+        """写回“改名后自动存 NFO”设置。"""
+        app = self.app
+        try:
+            settings = getattr(app, "settings", {})
+            settings["auto_nfo_after_rename"] = bool(checked)
+            fn = getattr(app, "_save_settings", None)
+            if callable(fn):
+                fn()
+        except Exception as e:      # noqa: BLE001
+            self.append_log(f"保存自动 NFO 设置失败：{e}")
+
     def _build_dir_panel(self) -> QWidget:
         """左栏：文件来源、导航、目录树、右键菜单。"""
         box = QWidget()
@@ -972,6 +1006,12 @@ class MainWindow(QMainWindow):
         mode_row.addWidget(self.btn_choose_root)
         mode_row.addStretch(1)
         lay.addLayout(mode_row)
+        self.radio_cloud.toggled.connect(
+            lambda on: on and _call(self.app, "_switch_mode", "cloud", True))
+        self.radio_local.toggled.connect(
+            lambda on: on and self._switch_local())
+        self.btn_choose_root.clicked.connect(
+            lambda: _call(self.app, "choose_local_root"))
 
         self.lbl_root = QLabel("")
         self.lbl_root.setStyleSheet("color:#777;")
@@ -982,6 +1022,8 @@ class MainWindow(QMainWindow):
         nav = QHBoxLayout()
         nav.setSpacing(6)
         self.btn_up = QPushButton("上一级")
+        self.btn_up.clicked.connect(
+            lambda: _call(self.app, "go_up"))
         nav.addWidget(self.btn_up)
         self.lbl_path = QLabel("根目录")
         self.lbl_path.setStyleSheet("color:#333;")
@@ -1026,6 +1068,21 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def _switch_local(self) -> None:
+        """切到本地模式：没有根目录时先让用户选一个。"""
+        app = self.app
+        root = str(getattr(app, "local_root", "") or "")
+        if not root:
+            _call(app, "choose_local_root")
+            root = str(getattr(app, "local_root", "") or "")
+            if not root:
+                # 没选成，退回网盘模式
+                self.radio_cloud.setChecked(True)
+                return
+        _call(app, "_switch_mode", "local", False)
+        self.lbl_root.setText(root)
+        _call(app, "refresh")
+
     def _build_plan_panel(self) -> QWidget:
         box = QWidget()
         lay = QVBoxLayout(box)
@@ -1034,8 +1091,12 @@ class MainWindow(QMainWindow):
 
         tools = QHBoxLayout()
         tools.setSpacing(6)
-        for text in ("全选自动项", "全选有操作的", "全不选"):
-            tools.addWidget(QPushButton(text))
+        for text, meth in (("全选自动项", "select_auto"),
+                           ("全选有操作的", "select_all_ops"),
+                           ("全不选", "select_none")):
+            b = QPushButton(text)
+            b.clicked.connect(lambda _c=False, m=meth: _call(self.app, m))
+            tools.addWidget(b)
         tools.addStretch(1)
         lay.addLayout(tools)
 
@@ -1174,6 +1235,7 @@ class MainWindow(QMainWindow):
         map_row = QHBoxLayout()
         map_row.setSpacing(6)
         self.btn_map = QPushButton("季集映射…")
+        self.btn_map.clicked.connect(self.open_episode_mapping)
         map_row.addWidget(self.btn_map)
         self.lbl_map = QLabel("")
         self.lbl_map.setStyleSheet("color:#777;")
@@ -1197,6 +1259,11 @@ class MainWindow(QMainWindow):
         self.btn_nfo_save = QPushButton("保存 NFO/图片")
         self.btn_nfo_clear = QPushButton("清空 NFO/图片…")
         self.chk_auto_nfo = QCheckBox("应用改名后自动存")
+        self.btn_nfo_save.clicked.connect(
+            lambda: _call(self.app, "save_nfo_artwork"))
+        self.btn_nfo_clear.clicked.connect(
+            lambda: _call(self.app, "clear_nfo_artwork"))
+        self.chk_auto_nfo.toggled.connect(self._on_auto_nfo_toggled)
         nfo_row.addWidget(self.btn_nfo_save)
         nfo_row.addWidget(self.btn_nfo_clear)
         nfo_row.addWidget(self.chk_auto_nfo)
