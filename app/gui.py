@@ -215,7 +215,10 @@ class App(tk.Tk):
             id_provider=self.settings.get("id_provider", "auto"),
             jp_folder_style=self.settings.get("jp_folder_style", "bdremux"),
             rename_subtitles=bool(self.settings.get("rename_subtitles", True)),
-            rename_season_folders=bool(self.settings.get("rename_season_folders", True)))
+            rename_season_folders=bool(self.settings.get("rename_season_folders", True)),
+            name_segment_source=self.settings.get("name_segment_source", "imdb"),
+            subtitle_source=self.settings.get("subtitle_source", "auto"),
+            include_specs=bool(self.settings.get("include_specs", True)))
         self.planner = Planner(self.meta, self.options, log=self.log_threadsafe)
 
     # ------------------------------------------------------------ 界面
@@ -4220,8 +4223,21 @@ class SettingsDialog(tk.Toplevel):
         self.douban_test_btn.pack(side="left", padx=6)
         self.douban_test_label = ttk.Label(frame, text="", foreground="#777")
         self.douban_test_label.pack(anchor="w")
-        ttk.Label(frame, text="命名规则：日番=标题 S01E01；电视剧/国产动画=标题 S01E01 [1080p WEB-DL HEVC]；电影=标题 (年份)。",
-                  wraplength=520, foreground="#555").pack(anchor="w", pady=(8, 0))
+
+        # 命名规则面板：中文主名称 . 来源名 . SxxExx . 副标题 [规格]
+        # 这里只调整“预览用”的 NamingOptions；点“保存”时才真正生效。
+        try:
+            import copy as _copy
+
+            from .naming_panel import NamingRulePanel
+            self._draft_options = _copy.copy(app.options)
+            self.naming_panel = NamingRulePanel(
+                frame, lambda: self._draft_options, lambda o: None)
+            self.naming_panel.pack(fill="x", pady=(8, 0))
+        except Exception as e:      # noqa: BLE001
+            self.naming_panel = None
+            ttk.Label(frame, text=f"命名规则面板加载失败：{e}",
+                      foreground="#b3261e").pack(anchor="w")
         ttk.Separator(frame).pack(fill="x", pady=(10, 8))
         # 按钮区改为正常顺序靠底，不再用 side="bottom" 与内容争抢空间：
         # 以前内容自然高度超过 610px 时，按钮会被压成一条细条。
@@ -4333,6 +4349,7 @@ class SettingsDialog(tk.Toplevel):
             "tmdb_key": self.tmdb_var.get().strip(),
             "douban_cookie": self.douban_cookie_var.get().strip(),
             "login_app": self.login_app_var.get(),
+            **(self.naming_panel.values() if self.naming_panel else {}),
         })
         self.destroy()
 

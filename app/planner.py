@@ -19,7 +19,7 @@ from typing import Callable, Optional
 
 from rapidfuzz import fuzz
 
-from . import qc
+from . import naming_rule, qc
 from .episode_versions import analyze_episode_versions
 from .metadata import (extract_latin_aliases, has_kana, norm_title,
                        strong_titles_agree, strip_season_and_subtitle,
@@ -514,6 +514,11 @@ class NamingOptions:
     rename_subtitles: bool = True
     rename_season_folders: bool = True
     min_auto_confidence: float = 0.70
+    # 命名方式（对应“命名规则”面板）：
+    # 中文主名称 . <来源名> . SxxExx . <副标题> [规格]
+    name_segment_source: str = "imdb"    # none/imdb/tmdb/douban/bangumi/local
+    subtitle_source: str = "auto"        # auto/keyword/name_source/imdb/...
+    include_specs: bool = True           # 是否写规格（原来的分类决定，现在可开关）
 
 
 @dataclass
@@ -2544,6 +2549,44 @@ class Planner:
             return ""
         return " ".join(out).strip(" -._")[:120]
 
+    def _name_segment(self, plan: PlanItem) -> str:
+        """“来源名”那一段：按设置里选的来源取。
+
+        - 所选来源**有**名字时一定用它（不会偷偷换成别的来源）；
+        - 所选来源**没有**名字（例如只拿到裸 ID、或该源条目缺失）时，
+          回退到原有的英文名推断（IMDb/TMDB/本地），保持旧行为；
+        - 选“不显示”则整段省略。
+        """
+        source = str(getattr(self.options, "name_segment_source", "imdb")
+                     or "imdb").lower()
+        if source == "none":
+            return ""
+        if source == "local":
+            return self._english_title(plan)
+        cand = {
+            "imdb": plan.match.imdb,
+            "tmdb": plan.match.tmdb,
+            "douban": plan.match.douban,
+            "bangumi": plan.match.bangumi,
+        }.get(source)
+        ref = plan.match.ref(source)
+        names: list[str] = []
+        if cand is not None:
+            names += [cand.original_title, cand.title]
+            if isinstance(cand.extra, dict):
+                names += list(cand.extra.get("aliases") or [])
+        if not names and ref:
+            names += [ref.get("original_title"), ref.get("title")]
+        for raw in names:
+            c = sanitize_name(str(raw or ""), 120)
+            if not c or norm_title(c) == norm_title(plan.title):
+                continue
+            if self._looks_like_release_tag(c):
+                continue
+            return c
+        # 该来源没有可用名字：回退到原有推断，避免“整段凭空消失”
+        return self._english_title(plan)
+
     def _english_title(self, plan: PlanItem) -> str:
         """取英文名（用于 中文名.英文名.SxxExx 这种文件命名）。"""
         names: list[str] = []
@@ -3033,7 +3076,10 @@ class Planner:
                 "series", plan.match, plan.parsed,
                 " ".join([mr.item.name] + list(mr.item.ancestors or [])))
         plan.category = category
-        want_specs = category in SPEC_CATEGORIES
+        # 以前规格是否写入由分类决定；现在改成显式开关（默认开），
+        # 日番本来就从简，保持不写。
+        want_specs = category in SPEC_CATEGORIES and bool(
+            getattr(self.options, "include_specs", True))
         # 日番视频名用日文；没有日文时用罗马音/英文名，最后才中文
         video_title = title
         if category == "jp_anime":
@@ -3128,12 +3174,13 @@ class Planner:
                         f"TMDB 第 {season} 季共 {count} 集，本任务出现 "
                         f"E{max(eps):02d}；请核对是否混入其他季或使用总集编号。")
 
-        # 电视剧/国产动画/美漫/欧美动画：中文名.英文名.SxxExx.副标题 [规格]
+        # 电视剧/国产动画/美漫/欧美动画：中文名.来源名.SxxExx.副标题 [规格]
         english_title = ""
         online_subs: dict[tuple[int, int], str] = {}
         name_source, name_sid = self.naming_ref(plan)
         if category in DOTTED_CATEGORIES or category == "jp_anime":
-            english_title = self._english_title(plan)
+            # “来源名”那一段：按设置里选的来源取（none 表示不显示）
+            english_title = self._name_segment(plan)
             seasons = sorted({s for _, s, ep, _, _ in resolved
                               if s is not None and ep is not None})
             source_empty = False
@@ -3247,9 +3294,10 @@ class Planner:
             version_no = analysis.version_numbers.get(e.item.fid, 0)
             version = f"v{version_no}" if version_no > 1 else ""
             if category in DOTTED_CATEGORIES:
-                new_name = _dotted_episode_name(
-                    title, english_title, season, ep, ep_end,
-                    subtitle, specs, ext, version)
+                new_name = naming_rule.build_episode_filename(
+                    title, season, ep, ext=ext,
+                    name_segment=english_title, subtitle=subtitle,
+                    specs=specs, ep_end=ep_end, version=version)
             else:
                 # 日番保留简洁命名；同集多文件时仍加 v2，避免同名冲突。
                 new_name = _episode_name(video_title, season, ep, ep_end,
