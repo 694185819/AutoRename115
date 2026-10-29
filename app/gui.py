@@ -920,6 +920,7 @@ class App(tk.Tk):
         "nfo_save": "_on_nfo_save",
         "nfo_clear": "_on_nfo_clear",
         "rebuild_done": "_on_rebuild_done",
+        "naming_applied": "_on_naming_applied",
         "douban_test": "_on_douban_test",
     }
 
@@ -2293,7 +2294,11 @@ class App(tk.Tk):
             pass
 
     def apply_naming_rule(self) -> None:
-        """主界面“命名规则”面板：保存为默认设置，并重建当前任务。"""
+        """主界面“命名规则”面板：保存为默认设置，并重建所有任务预览。
+
+        只重建“当前选中项”的话，其他任务仍显示旧名字，
+        会让人以为选项没生效。
+        """
         if self.naming_panel is None:
             return
         values = self.naming_panel.values()
@@ -2303,18 +2308,42 @@ class App(tk.Tk):
         except Exception as e:      # noqa: BLE001
             self._log(f"保存命名规则失败：{e}")
         self._init_meta()
-        p = self.detail_plan
-        if p is None:
-            self._log("命名规则已保存；选中任务后点“重新生成预览”即可生效。")
+        plans = list(self.plans or [])
+        if not plans:
+            self._log("命名规则已保存；分析任务后即按新规则命名。")
+            return
+        planner = self.planner
+
+        def task():
+            ok = 0
+            for p in plans:
+                try:
+                    planner.rebuild(p)
+                    ok += 1
+                except Exception:      # noqa: BLE001
+                    pass
+            return ok
+
+        if self.busy:
+            self._log("有任务在执行，命名规则已保存；请稍后重新分析。")
             return
 
-        def done(ok: bool, err: str) -> None:
-            if ok:
-                self._log(f"命名规则已应用：{p.title}（{len(p.ops)} 个操作）")
-            else:
-                self._log(f"按新规则重建失败：{err}")
+        def finish(payload) -> None:
+            self._set_busy(False)
+            self._render_plans()
+            self._log(f"命名规则已应用，重建 {payload} 个任务。")
 
-        self.rebuild_in_background(p, done)
+        self.run_async(task, "naming_applied")
+        self._naming_applied_hook = finish
+
+    def _on_naming_applied(self, payload) -> None:
+        hook = getattr(self, "_naming_applied_hook", None)
+        self._naming_applied_hook = None
+        if callable(hook):
+            hook(payload)
+        else:
+            self._set_busy(False)
+            self._render_plans()
 
     def _set_note(self, text: str) -> None:
         """把备注写进限高的可滚动框（内容多于 3 行时可滚动查看）。"""

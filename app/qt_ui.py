@@ -78,16 +78,29 @@ def _fmt_size(size) -> str:
 
 def _call(app, name: str, *args, **kwargs):
     """安全调用业务层方法：不存在或报错时只记日志，不让界面崩。"""
-    fn = getattr(app, name, None)
+    fn = _opt(app, name, None)
     if not callable(fn):
         return None
     try:
         return fn(*args, **kwargs)
     except Exception as e:      # noqa: BLE001
-        log = getattr(app, "log_threadsafe", None)
-        if log:
+        log = _opt(app, "log_threadsafe", None)
+        if callable(log):
             log(f"{name} 执行失败：{e}")
         return None
+
+
+def _opt(app, name: str, default=None):
+    """安全读取 App 的属性。
+
+    App 继承自 tkinter.Tk：直接用 getattr(app, name, default) 在属性
+    不存在时会走 Tk.__getattr__ → self.tk（同样不存在）→ 无限递归，
+    最终抛 RecursionError。这里绕开 __getattr__，只查实例与类字典。
+    """
+    try:
+        return object.__getattribute__(app, name)
+    except AttributeError:
+        return default
 
 
 class NamingRulePanel(QWidget):
@@ -253,7 +266,7 @@ class SettingsDialog(QDialog):
         self.app = app
         self.setWindowTitle("设置")
         self.setMinimumWidth(680)
-        s = getattr(app, "settings", {}) or {}
+        s = _opt(app, "settings", {}) or {}
 
         lay = QVBoxLayout(self)
         lay.setSpacing(8)
@@ -445,7 +458,7 @@ class SettingsDialog(QDialog):
             from app.douban_browser import open_login_window
             try:
                 browser = open_login_window(
-                    getattr(self.app, "app_dir", "."), log=lambda s: None)
+                    _opt(self.app, "app_dir", "."), log=lambda s: None)
             except Exception as e:      # noqa: BLE001
                 self._sig_emit(lambda: self.lbl_douban_login.setText(
                     f"打开失败：{e}"))
@@ -469,7 +482,7 @@ class SettingsDialog(QDialog):
 
             from app.douban_browser import (DoubanBrowser, is_logged_in,
                                             related_ids_from_douban)
-            profile = os.path.join(getattr(self.app, "app_dir", "."),
+            profile = os.path.join(_opt(self.app, "app_dir", "."),
                                    "data", "browser_profile")
             b = DoubanBrowser(user_dir=profile, headless=True)
             ok = False
@@ -512,17 +525,36 @@ class SettingsDialog(QDialog):
             "remember_plans": self.chk_remember.isChecked(),
         }
         app = self.app
+        # 防重入：_init_meta 会重建主界面命名面板，面板构造时又会读设置。
+        # 注意 App 是 Tkinter 子类：直接 getattr(app, "...") 在属性缺失时
+        # 会走 tkinter.Tk.__getattr__ → self.tk（也不存在）→ 无限递归，
+        # 表现为“保存失败：maximum recursion depth exceeded”。
+        # 所以必须用 object.__getattribute__ 判断。
+        try:
+            saving = object.__getattribute__(app, "_settings_saving")
+        except AttributeError:
+            saving = False
+        if saving:
+            return
+        object.__setattr__(app, "_settings_saving", True)
         try:
             app.settings.update(values)
-            fn = getattr(app, "_save_settings", None)
+            fn = _opt(app, "_save_settings", None)
             if callable(fn):
                 fn()
-            init = getattr(app, "_init_meta", None)
+            init = _opt(app, "_init_meta", None)
             if callable(init):
                 init()
+        except RecursionError:
+            QMessageBox.warning(
+                self, "设置",
+                "保存时出现递归，请重启程序后再试。")
+            return
         except Exception as e:      # noqa: BLE001
             QMessageBox.warning(self, "设置", f"保存失败：{e}")
             return
+        finally:
+            object.__setattr__(app, "_settings_saving", False)
         self.accept()
 
 
@@ -604,7 +636,7 @@ class ManualSearchDialog(QDialog):
 
         def worker():
             from app.search_service import search_all
-            meta = getattr(app, "meta", None)
+            meta = _opt(app, "meta", None)
             if meta is None:
                 self._sig_emit(lambda: self._show([], "未连接资料来源"))
                 return
@@ -657,7 +689,7 @@ class ManualSearchDialog(QDialog):
         if row < 0 or row >= len(self._candidates):
             return
         cand = self._candidates[row]
-        fn = getattr(self.app, "_apply_manual_candidate", None)
+        fn = _opt(self.app, "_apply_manual_candidate", None)
         if not callable(fn):
             self.lbl_hint.setText("当前版本不支持手动应用，请用默认界面。")
             return
@@ -736,7 +768,7 @@ class EpisodeMappingDialog(QDialog):
                 continue
             overrides[fid] = (season, ep)
         plan.episode_overrides = overrides
-        fn = getattr(self.app, "_apply_episode_mapping", None)
+        fn = _opt(self.app, "_apply_episode_mapping", None)
         if callable(fn):
             try:
                 fn(plan)
@@ -790,7 +822,7 @@ class LoginDialog(QDialog):
         self.combo_app = QComboBox()
         self.combo_app.addItems(["ios", "android", "web"])
         self.combo_app.setCurrentText(
-            str((getattr(app, "settings", {}) or {}).get("login_app", "ios")))
+            str((_opt(app, "settings", {}) or {}).get("login_app", "ios")))
         self.combo_app.currentTextChanged.connect(lambda _t: self.refresh_qr())
         dev_row.addWidget(self.combo_app)
         dev_row.addStretch(1)
@@ -897,7 +929,7 @@ class LoginDialog(QDialog):
             self.status_label.setText("登录成功")
             self.status_label.setStyleSheet("color:#176b33;")
             # 通知业务层刷新状态
-            post = getattr(self.app, "post", None)
+            post = _opt(self.app, "post", None)
             if callable(post):
                 try:
                     post("login_check", True)
@@ -1160,25 +1192,26 @@ class MainWindow(QMainWindow):
 
     def open_login(self) -> None:
         """115 登录：优先扫码，也可改用 Cookie。"""
-        client = getattr(self.app, "client", None)
+        client = _opt(self.app, "client", None)
         if client is None:
-            QMessageBox.information(
-                self, "登录 115",
-                "尚未创建客户端连接。\n"
-                "请检查网络或先用默认界面完成登录。")
+            # 不要弹窗打断：写进日志和状态栏即可，用户没连网时
+            # 点登录是常见操作，弹框反而碍事。
+            self.append_log("尚未连接到 115：请先用默认界面登录，"
+                            "或检查网络后重试。")
+            self.lbl_status.setText("尚未连接 115")
             return
         LoginDialog(self, self.app, client).exec()
 
     def open_manual_search(self) -> None:
         """手动搜索：先选任务，再按关键词搜各来源。"""
-        p = getattr(self.app, "detail_plan", None)
+        p = _opt(self.app, "detail_plan", None)
         if p is None:
             QMessageBox.information(self, "手动搜索", "请先选择一个任务。")
             return
         ManualSearchDialog(self, self.app, p).exec()
 
     def open_episode_mapping(self) -> None:
-        p = getattr(self.app, "detail_plan", None)
+        p = _opt(self.app, "detail_plan", None)
         if p is None:
             QMessageBox.information(self, "季集映射", "请先选择一个任务。")
             return
@@ -1192,9 +1225,9 @@ class MainWindow(QMainWindow):
         """写回“改名后自动存 NFO”设置。"""
         app = self.app
         try:
-            settings = getattr(app, "settings", {})
+            settings = _opt(app, "settings", {})
             settings["auto_nfo_after_rename"] = bool(checked)
-            fn = getattr(app, "_save_settings", None)
+            fn = _opt(app, "_save_settings", None)
             if callable(fn):
                 fn()
         except Exception as e:      # noqa: BLE001
@@ -1302,10 +1335,10 @@ class MainWindow(QMainWindow):
     def _switch_local(self) -> None:
         """切到本地模式：没有根目录时先让用户选一个。"""
         app = self.app
-        root = str(getattr(app, "local_root", "") or "")
+        root = str(_opt(app, "local_root", "") or "")
         if not root:
             _call(app, "choose_local_root")
-            root = str(getattr(app, "local_root", "") or "")
+            root = str(_opt(app, "local_root", "") or "")
             if not root:
                 # 没选成，退回网盘模式
                 self.radio_cloud.setChecked(True)
@@ -1365,7 +1398,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ 目录树
     def render_dir_items(self) -> None:
         """把当前目录内容刷到左栏（对应 Tk 版 _fill_dir_tree）。"""
-        items = getattr(self.app, "dir_items", {}) or {}
+        items = _opt(self.app, "dir_items", {}) or {}
         self.dir_tree.clear()
         entries = list(items.values())
         # 文件夹在前，文件在后，各自按名称排序
@@ -1391,13 +1424,13 @@ class MainWindow(QMainWindow):
             node.setData(0, Qt.UserRole, getattr(it, "fid", ""))
             self.dir_tree.addTopLevelItem(node)
         path = " / ".join(name for _cid, name in
-                          (getattr(self.app, "path_stack", None) or
+                          (_opt(self.app, "path_stack", None) or
                            [("0", "根目录")]))
         self.lbl_path.setText(path)
 
     def selected_dir_items(self) -> list:
         """当前在左栏选中的文件/文件夹对象列表。"""
-        items = getattr(self.app, "dir_items", {}) or {}
+        items = _opt(self.app, "dir_items", {}) or {}
         out = []
         for node in self.dir_tree.selectedItems():
             fid = node.data(0, Qt.UserRole)
@@ -1408,10 +1441,10 @@ class MainWindow(QMainWindow):
 
     def _on_dir_double_click(self, node, _col) -> None:
         fid = node.data(0, Qt.UserRole)
-        items = getattr(self.app, "dir_items", {}) or {}
+        items = _opt(self.app, "dir_items", {}) or {}
         it = items.get(fid)
         if it is not None and getattr(it, "is_dir", False):
-            fn = getattr(self.app, "_enter_dir_item", None)
+            fn = _opt(self.app, "_enter_dir_item", None)
             if fn:
                 fn(it)
 
@@ -1436,7 +1469,7 @@ class MainWindow(QMainWindow):
             _call(self.app, "analyze_selected")
         elif chosen is act_rename and node is not None:
             # 先让业务层知道当前选中项，再走它的改名流程
-            items = getattr(self.app, "dir_items", {}) or {}
+            items = _opt(self.app, "dir_items", {}) or {}
             it = items.get(node.data(0, Qt.UserRole))
             if it is not None:
                 setattr(self.app, "current_item", it)
@@ -1522,24 +1555,68 @@ class MainWindow(QMainWindow):
         lay.addStretch(1)
         return box
 
+    def _sig_emit(self, fn) -> None:
+        """从后台线程回到界面线程执行。"""
+        if getattr(self, "_sig", None) is None:
+            self._sig = _UiSignal()
+            self._sig.fn.connect(
+                lambda f: f() if callable(f) else None)
+        self._sig.fn.emit(fn)
+
     def save_naming_rule(self) -> None:
-        """把命名规则写回设置（对应 Tk 版 apply_naming_rule）。"""
+        """把命名规则写回设置，并立即用新规则重建所有任务预览。
+
+        只写设置不重建的话，已经分析过的任务仍显示旧名字，
+        看起来就像“选项没生效”。
+        """
         values = self.naming_panel.values()
         app = self.app
         try:
-            settings = getattr(app, "settings", {})
+            settings = _opt(app, "settings", {})
             settings.update(values)
-            fn = getattr(app, "_save_settings", None)
+            fn = _opt(app, "_save_settings", None)
             if callable(fn):
                 fn()
-            opts = getattr(app, "options", None)
+            opts = _opt(app, "options", None)
             if opts is not None:
                 for k, v in values.items():
                     setattr(opts, k, v)
+            # planner 持有同一份 options 引用；若它是独立副本也同步一次
+            planner = _opt(app, "planner", None)
+            planner_opts = getattr(planner, "options", None)
+            if planner_opts is not None and planner_opts is not opts:
+                for k, v in values.items():
+                    setattr(planner_opts, k, v)
             self.append_log("命名规则已保存：" + ", ".join(
                 f"{k}={v}" for k, v in values.items()))
         except Exception as e:      # noqa: BLE001
             self.append_log(f"保存命名规则失败：{e}")
+            return
+        self._rebuild_all_plans()
+
+    def _rebuild_all_plans(self) -> None:
+        """按当前命名规则重建所有任务的预览（后台执行，不卡界面）。"""
+        plans = list(_opt(self.app, "plans", []) or [])
+        planner = _opt(self.app, "planner", None)
+        if not plans or planner is None:
+            return
+        self.append_log(f"正在按新规则重建 {len(plans)} 个任务的预览…")
+
+        def worker():
+            ok_n = 0
+            for p in plans:
+                try:
+                    planner.rebuild(p)
+                    ok_n += 1
+                except Exception:      # noqa: BLE001
+                    pass
+
+            def done():
+                self.render_plans()
+                self.append_log(f"已按新规则重建 {ok_n} 个任务。")
+            self._sig_emit(done)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _build_statusbar(self) -> QWidget:
         bar = QWidget()
@@ -1555,7 +1632,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------ 数据
     def render_plans(self) -> None:
         """把业务层的 plan 列表刷到表格（对应 Tk 版 _render_plans）。"""
-        plans = getattr(self.app, "plans", []) or []
+        plans = _opt(self.app, "plans", []) or []
         current = self.table.currentIndex().row()
         self.plan_model.set_plans(plans)
         if plans:
