@@ -44,9 +44,21 @@ EXAMPLE_SUBTITLES = {
     "keyword": "灯塔和光影会",
 }
 
+# 日番文件夹格式（与 gui.JP_FOLDER_LABELS 保持一致的取值）
+JP_FOLDER_OPTIONS = {
+    "bdremux": "[BD-REMUX]中文名 日文名 (年份) [ID]",
+    "standard": "标准：中文名 (年份) [ID]",
+}
+
+# 电影命名：目前只有这一种写法
+MOVIE_STYLES = {
+    "title_year": "中文名 (年份) [ID]",
+}
+MOVIE_LABELS = dict(MOVIE_STYLES)
+
 
 class NamingRulePanel(ttk.LabelFrame):
-    """放在设置对话框里的“命名规则”面板。"""
+    """主界面的“命名规则”面板：剧集、日番、电影都由它统一配置。"""
 
     def __init__(self, parent, options_getter, options_setter):
         super().__init__(parent, text="命名规则", padding=8)
@@ -63,6 +75,13 @@ class NamingRulePanel(ttk.LabelFrame):
                 SUBTITLE_LABELS["auto"]))
         self.spec_var = tk.BooleanVar(
             value=bool(getattr(opts, "include_specs", True)))
+        self.jp_var = tk.StringVar(value=JP_FOLDER_OPTIONS.get(
+            getattr(opts, "jp_folder_style", "bdremux"),
+            JP_FOLDER_OPTIONS["bdremux"]))
+        self.movie_var = tk.StringVar(
+            value=MOVIE_LABELS.get(getattr(opts, "movie_style",
+                                           "title_year"),
+                                   MOVIE_LABELS["title_year"]))
         self._build()
         self._refresh_preview()
 
@@ -102,6 +121,24 @@ class NamingRulePanel(ttk.LabelFrame):
                                  wraplength=520, justify="left")
         self.preview.pack(anchor="w", pady=(4, 0))
 
+        # 日番与电影也在这里统一配置，避免散落到设置窗口。
+        extra = ttk.Frame(self)
+        extra.pack(fill="x", pady=(6, 0))
+        ttk.Label(extra, text="日番文件夹格式").pack(side="left")
+        self.jp_box = ttk.Combobox(
+            extra, textvariable=self.jp_var, state="readonly", width=26,
+            values=list(JP_FOLDER_OPTIONS.values()))
+        self.jp_box.pack(side="left", padx=(4, 12))
+        self.jp_box.bind("<<ComboboxSelected>>", lambda e: self._refresh())
+        ttk.Label(extra, text="电影").pack(side="left")
+        self.movie_box = ttk.Combobox(
+            extra, textvariable=self.movie_var, state="readonly", width=26,
+            values=[MOVIE_LABELS[k] for k in MOVIE_STYLES])
+        self.movie_box.pack(side="left", padx=(4, 0))
+        self.movie_box.bind("<<ComboboxSelected>>", lambda e: self._refresh())
+        ttk.Label(extra, text="（电影目前只有这一种写法）",
+                  foreground="#777").pack(side="left", padx=(6, 0))
+
     @staticmethod
     def _fixed_label(parent, text: str) -> ttk.Label:
         lab = ttk.Label(parent, text=text, foreground=GREY,
@@ -130,6 +167,13 @@ class NamingRulePanel(ttk.LabelFrame):
                 return key
         return "auto"
 
+    def _jp_key(self) -> str:
+        label = self.jp_var.get()
+        for key, val in JP_FOLDER_OPTIONS.items():
+            if val == label:
+                return key
+        return "bdremux"
+
     def _refresh_preview(self) -> None:
         seg_key = self._source_key()
         sample = build_episode_filename(
@@ -137,7 +181,14 @@ class NamingRulePanel(ttk.LabelFrame):
             name_segment=EXAMPLE_SEGMENTS.get(seg_key, ""),
             subtitle="灯塔和光影会",
             specs="1080p WEB-DL" if self.spec_var.get() else "")
-        self.preview.configure(text="示例：" + sample)
+        if self._jp_key() == "bdremux":
+            jp_example = "[BD-REMUX]86 -不存在的战区 86―エイティシックス― (2021) [imdbid-tt13718450]"
+        else:
+            jp_example = "86 -不存在的战区 (2021) [imdbid-tt13718450]"
+        movie_example = "朝花夕拾 (2018) [imdbid-tt9691596]"
+        self.preview.configure(
+            text=f"剧集：{sample}\n日番文件夹：{jp_example}\n"
+                 f"电影：{movie_example}")
         self._apply()
 
     def _refresh(self) -> None:
@@ -148,6 +199,7 @@ class NamingRulePanel(ttk.LabelFrame):
         opts.name_segment_source = self._source_key()
         opts.subtitle_source = self._subtitle_key()
         opts.include_specs = bool(self.spec_var.get())
+        opts.jp_folder_style = self._jp_key()
         self._set_options(opts)
 
     def reload(self) -> None:
@@ -160,6 +212,9 @@ class NamingRulePanel(ttk.LabelFrame):
             getattr(opts, "subtitle_source", "auto"),
             SUBTITLE_LABELS["auto"]))
         self.spec_var.set(bool(getattr(opts, "include_specs", True)))
+        self.jp_var.set(JP_FOLDER_OPTIONS.get(
+            getattr(opts, "jp_folder_style", "bdremux"),
+            JP_FOLDER_OPTIONS["bdremux"]))
         self._refresh_preview()
 
     def values(self) -> dict:
@@ -168,4 +223,5 @@ class NamingRulePanel(ttk.LabelFrame):
             "name_segment_source": self._source_key(),
             "subtitle_source": self._subtitle_key(),
             "include_specs": bool(self.spec_var.get()),
+            "jp_folder_style": self._jp_key(),
         }

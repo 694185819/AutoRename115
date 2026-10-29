@@ -51,7 +51,8 @@ if app.plan_tree.get_children():
     app.plan_tree.selection_set(app.plan_tree.get_children()[0])
     app.update()
     print("detail title:", app.title_var.get(), "year:", app.year_var.get(),
-          "season:", app.season_var.get(), "category:", app.category_var.get())
+          "season:", app.season_var.get(),
+          "category:", app.detail_plan.category if app.detail_plan else "")
     print("meta:", app.meta_label.cget("text"))
 
 app.after(1000, app.destroy)

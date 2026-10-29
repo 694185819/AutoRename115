@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
-"""设置窗口：日番文件夹格式只保留两种；底部按钮不被挤压。"""
+"""设置窗口：日番格式已移到主界面命名规则面板；底部按钮不被挤压。"""
 import sys
 
 sys.path.insert(0, r"I:\实验\AutoRename115")
 
 import tempfile
 
-from app.gui import App, JP_FOLDER_LABELS, SettingsDialog
+from app.gui import App, SettingsDialog
+from app.naming_panel import JP_FOLDER_OPTIONS
 
 
 def walk(widget):
@@ -16,45 +17,39 @@ def walk(widget):
 
 
 def main():
-    # 只保留“标准”和“你的风格”两种写法
-    assert set(JP_FOLDER_LABELS) == {"standard", "bdremux"}, JP_FOLDER_LABELS
-    labels = list(JP_FOLDER_LABELS.values())
-    assert not any("标签在后" in v or v.endswith("[BD-REMUX]") or
-                   "日文名 [ID]" in v for v in labels), labels
-
     app = App(tempfile.mkdtemp(prefix="arn115_settings_"))
     app.deiconify()
     app.update()
+
+    # 主界面的命名规则面板里应该有日番格式下拉框
+    panel = app.naming_panel
+    assert panel is not None
+    jp_boxes = [w for w in walk(panel)
+                if w.winfo_class() == "TCombobox"
+                and set(w.cget("values")) == set(JP_FOLDER_OPTIONS.values())]
+    assert jp_boxes, "主界面面板应提供日番文件夹格式"
+    print("主界面日番选项:", list(jp_boxes[0].cget("values")))
+
+    # 设置窗口不应再有日番下拉框
     dlg = SettingsDialog(app)
     app.update()
+    dup = [w for w in walk(dlg)
+           if w.winfo_class() == "TCombobox"
+           and set(w.cget("values")) == set(JP_FOLDER_OPTIONS.values())]
+    assert not dup, "设置窗口不应重复提供日番格式"
+    # 设置窗口也不应再重复命名规则面板
+    assert not any(isinstance(w, type(panel)) for w in walk(dlg)), \
+        "设置窗口不应重复放置命名规则面板"
 
-    combos = [w for w in walk(dlg) if w.winfo_class() == "TCombobox"]
-    jp = [c for c in combos if len(c.cget("values")) == len(JP_FOLDER_LABELS)]
-    assert jp, "找不到日番格式下拉框"
-    assert list(jp[0].cget("values")) == labels, \
-        jp[0].cget("values")
-
-    # 旧配置值 bdremux_suffix 落到默认“你的风格”，不会显示空白
-    app.settings["jp_folder_style"] = "bdremux_suffix"
-    dlg2 = SettingsDialog(app)
-    app.update()
-    combos2 = [w for w in walk(dlg2)
-               if w.winfo_class() == "TCombobox"
-               and len(w.cget("values")) == len(JP_FOLDER_LABELS)]
-    assert combos2 and combos2[0].get() == \
-        JP_FOLDER_LABELS["bdremux"], combos2[0].get() if combos2 else None
-    dlg2.destroy()
-
-    # 按钮区恢复正常高度（被挤压时约 16px，正常约 27px）
+    # 底部按钮高度正常（不被挤压）
     buttons = [w for w in walk(dlg)
                if w.winfo_class() == "TButton" and w.winfo_manager()]
     heights = {w.cget("text"): w.winfo_height() for w in buttons}
+    print("按钮高度:", heights)
     for text in ("关于…", "保存", "取消"):
-        assert heights.get(text), f"缺少按钮 {text}"
-    assert min(heights.values()) >= 24, heights
+        assert heights.get(text, 0) >= 24, (text, heights.get(text))
     outer = dlg.winfo_children()[0]
-    assert dlg.winfo_height() >= outer.winfo_reqheight(), (
-        dlg.winfo_height(), outer.winfo_reqheight())
+    assert dlg.winfo_height() >= outer.winfo_reqheight()
 
     dlg.destroy()
     app.destroy()

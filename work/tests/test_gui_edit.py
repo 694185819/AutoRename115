@@ -49,7 +49,8 @@ for iid in rows:
     if "芙莉莲" in p.title:
         app.plan_tree.selection_set(iid)
         app.update()
-        app.category_var.set("电视剧（中英+副标题）")
+        # 分类下拉已移除：直接给任务设置分类再重建
+        p.category = "tv"
         app.rebuild_detail()
         app.wait_for_rebuild()
         app.update()

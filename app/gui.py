@@ -274,7 +274,7 @@ class App(tk.Tk):
         # 加入命名规则面板后下方被压缩到看不见）。任务表会吃掉多余高度。
         width = 1280 + self._cm_to_px(10)
         screen_h = self.winfo_screenheight()
-        height = min(990 + self._cm_to_px(1), screen_h - 60)
+        height = min(1110 + self._cm_to_px(1), screen_h - 60)
         self._center_window(self, width, height)
         # 最小高度同步放宽，避免缩小窗口后下方再次被压扁
         self.minsize(1000, min(900, self.winfo_screenheight() - 80))
@@ -515,7 +515,7 @@ class App(tk.Tk):
                                    command=self.restore_plans_manual)
 
         # 详情
-        detail = ttk.LabelFrame(right, text="选中项详情（可修改标题/年份/季/分类后重新预览）",
+        detail = ttk.LabelFrame(right, text="选中项详情（可修改标题/年份/季后重新预览；命名格式见下方“命名规则”）",
                                 padding=6)
         detail.pack(fill="x", pady=(6, 4))
         row = ttk.Frame(detail)
@@ -529,12 +529,8 @@ class App(tk.Tk):
         ttk.Label(row, text="季").pack(side="left")
         self.season_var = tk.StringVar()
         ttk.Entry(row, textvariable=self.season_var, width=5).pack(side="left", padx=(3, 10))
-        ttk.Label(row, text="分类").pack(side="left")
-        self.category_var = tk.StringVar()
-        self.category_box = ttk.Combobox(row, textvariable=self.category_var,
-                                         values=[CATEGORY_LABELS[k] for k in CATEGORY_KEYS],
-                                         state="readonly", width=20)
-        self.category_box.pack(side="left", padx=(3, 10))
+        # 分类下拉已移除：命名格式由主界面“命名规则”面板统一决定，
+        # 这里只保留标题/年份/季的修正与预览按钮。
         ttk.Button(row, text="重新生成预览",
                    command=self.rebuild_detail).pack(side="left")
         ttk.Button(row, text="手动搜索",
@@ -543,25 +539,10 @@ class App(tk.Tk):
                    command=self.preview_ops).pack(side="left", padx=4)
         self.meta_label = ttk.Label(detail, text="", foreground="#555")
         self.meta_label.pack(fill="x", pady=(4, 0))
-        # 备注常常很长（搜索诊断 + 疑似重复 + 冲突说明），以前直接用 Label
-        # 撑开会挤压下方内容；改成固定高度、可滚动的文本框。
-        note_box = ttk.Frame(detail)
-        note_box.pack(fill="x", pady=(2, 0))
-        self.note_label = tk.Text(
-            note_box, height=3, wrap="word", foreground="#a15c00",
-            background="#fbfaf5", relief="solid", bd=1,
-            font=("Microsoft YaHei UI", 9), padx=4, pady=2,
-            cursor="arrow")
-        note_sb = ttk.Scrollbar(note_box, orient="vertical",
-                                command=self.note_label.yview)
-        self.note_label.configure(yscrollcommand=note_sb.set,
-                                  state="disabled")
-        self.note_label.pack(side="left", fill="x", expand=True)
-        note_sb.pack(side="right", fill="y")
-        self.note_label.bind("<MouseWheel>", self._on_note_wheel)
-        self._note_sb = note_sb
+        # 季集映射/视频数与 NFO 操作都属于“这个任务怎么处理”的信息，
+        # 紧跟在元信息后面，备注框放到最后，避免长备注把人挤开。
         map_row = ttk.Frame(detail)
-        map_row.pack(fill="x", pady=(3, 0))
+        map_row.pack(fill="x", pady=(4, 0))
         self.map_btn = ttk.Button(map_row, text="季集映射…",
                                   command=self.open_episode_mapping,
                                   state="disabled")
@@ -583,6 +564,23 @@ class App(tk.Tk):
         self.nfo_mode_label = ttk.Label(
             nfo_row, text=self._nfo_mode_text(), foreground="#777")
         self.nfo_mode_label.pack(side="left", padx=8)
+        # 备注常常很长（搜索诊断 + 疑似重复 + 冲突说明），以前直接用 Label
+        # 撑开会挤压下方内容；改成固定高度、可滚动的文本框，并放在最后。
+        note_box = ttk.Frame(detail)
+        note_box.pack(fill="x", pady=(4, 0))
+        self.note_label = tk.Text(
+            note_box, height=3, wrap="word", foreground="#a15c00",
+            background="#fbfaf5", relief="solid", bd=1,
+            font=("Microsoft YaHei UI", 9), padx=4, pady=2,
+            cursor="arrow")
+        note_sb = ttk.Scrollbar(note_box, orient="vertical",
+                                command=self.note_label.yview)
+        self.note_label.configure(yscrollcommand=note_sb.set,
+                                  state="disabled")
+        self.note_label.pack(side="left", fill="x", expand=True)
+        note_sb.pack(side="right", fill="y")
+        self.note_label.bind("<MouseWheel>", self._on_note_wheel)
+        self._note_sb = note_sb
 
         # 命名规则：直接放在主界面，改完可以对当前任务立即重建预览。
         naming = ttk.LabelFrame(right, text="命名规则（修改后点“按此规则重建”或重新分析）",
@@ -1927,8 +1925,7 @@ class App(tk.Tk):
             self._plan_selected()
         else:
             self.detail_plan = None
-            for var in (self.title_var, self.year_var,
-                        self.season_var, self.category_var):
+            for var in (self.title_var, self.year_var, self.season_var):
                 var.set("")
             self.meta_label.configure(text="")
             self._set_note("")
@@ -1963,7 +1960,6 @@ class App(tk.Tk):
             self.season_var.set(str(p.seasons[0]))
         else:
             self.season_var.set("")
-        self.category_var.set(CATEGORY_LABELS.get(p.category, CATEGORY_LABELS["auto"]))
         videos = [e for e in ((p.context or {}).get("entries") or [])
                   if e.is_video]
         if p.media_type == "series" and videos:
@@ -2760,7 +2756,7 @@ class App(tk.Tk):
         p.title_override = title
         p.year_override = year
         p.season_override = season
-        p.category = LABEL_TO_CATEGORY.get(self.category_var.get(), "auto")
+        # 分类不再由界面下拉指定：保留任务原有分类（自动判断结果）。
         if season is not None:
             p.season_confirmed = True
 
@@ -4221,25 +4217,10 @@ class SettingsDialog(tk.Toplevel):
                      values=["auto", "tmdb", "imdb"]).pack(side="left", padx=6)
         ttk.Label(frame, text="Jellyfin 建议 auto/tmdb（自带 TMDB 提供器）；Emby 选 emby 写法；IMDb 标识需要 OMDb 插件。",
                   foreground="#777", wraplength=520).pack(anchor="w")
-        jp_row = ttk.Frame(frame)
-        jp_row.pack(anchor="w", pady=3)
-        ttk.Label(jp_row, text="日番文件夹格式").pack(side="left")
-        cur_style = s.get("jp_folder_style", "bdremux")
-        if cur_style not in JP_FOLDER_LABELS:
-            # 旧配置里的 bdremux_suffix / bdremux_no_year 已不在选项中，
-            # 按默认“你的风格”显示并保存。
-            cur_style = "bdremux"
-        self.jp_style_var = tk.StringVar(
-            value=JP_FOLDER_LABELS.get(cur_style,
-                                       JP_FOLDER_LABELS["bdremux"]))
-        ttk.Combobox(jp_row, textvariable=self.jp_style_var,
-                     state="readonly", width=42,
-                     values=list(JP_FOLDER_LABELS.values())).pack(
-            side="left", padx=8)
-        ttk.Label(frame, text="带 [BD-REMUX] 的样式会保留你的命名习惯；"
-                              "标题在前的样式更适合海报墙刮削。"
-                              "ID 放在末尾，不要省略年份。",
-                  foreground="#777", wraplength=520).pack(anchor="w")
+        # 日番文件夹格式已移到主界面“命名规则”面板，这里不再重复设置。
+        ttk.Label(frame, text="日番文件夹格式、剧集各段来源、是否写规格，"
+                              "都在主界面“命名规则”面板里配置。",
+                  foreground="#777", wraplength=520).pack(anchor="w", pady=3)
         ttk.Checkbutton(frame, text="同步重命名同名字幕/音轨文件",
                         variable=self.vars["rename_subtitles"]).pack(anchor="w", pady=3)
         ttk.Checkbutton(frame, text="把季目录改名为 Season 01（不新建目录）",
@@ -4422,8 +4403,6 @@ class SettingsDialog(tk.Toplevel):
             "remember_plans": bool(self.vars["remember_plans"].get()),
             "imdb_id_style": self.style_var.get(),
             "id_provider": self.provider_var.get(),
-            "jp_folder_style": JP_LABEL_TO_KEY.get(
-                self.jp_style_var.get(), "bdremux"),
             "tmdb_key": self.tmdb_var.get().strip(),
             "douban_cookie": self.douban_cookie_var.get().strip(),
             "login_app": self.login_app_var.get(),
