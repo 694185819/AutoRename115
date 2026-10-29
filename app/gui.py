@@ -543,9 +543,23 @@ class App(tk.Tk):
                    command=self.preview_ops).pack(side="left", padx=4)
         self.meta_label = ttk.Label(detail, text="", foreground="#555")
         self.meta_label.pack(fill="x", pady=(4, 0))
-        self.note_label = ttk.Label(detail, text="", foreground="#a15c00",
-                                    wraplength=820, justify="left")
-        self.note_label.pack(fill="x", pady=(2, 0))
+        # 备注常常很长（搜索诊断 + 疑似重复 + 冲突说明），以前直接用 Label
+        # 撑开会挤压下方内容；改成固定高度、可滚动的文本框。
+        note_box = ttk.Frame(detail)
+        note_box.pack(fill="x", pady=(2, 0))
+        self.note_label = tk.Text(
+            note_box, height=3, wrap="word", foreground="#a15c00",
+            background="#fbfaf5", relief="solid", bd=1,
+            font=("Microsoft YaHei UI", 9), padx=4, pady=2,
+            cursor="arrow")
+        note_sb = ttk.Scrollbar(note_box, orient="vertical",
+                                command=self.note_label.yview)
+        self.note_label.configure(yscrollcommand=note_sb.set,
+                                  state="disabled")
+        self.note_label.pack(side="left", fill="x", expand=True)
+        note_sb.pack(side="right", fill="y")
+        self.note_label.bind("<MouseWheel>", self._on_note_wheel)
+        self._note_sb = note_sb
         map_row = ttk.Frame(detail)
         map_row.pack(fill="x", pady=(3, 0))
         self.map_btn = ttk.Button(map_row, text="季集映射…",
@@ -1917,7 +1931,7 @@ class App(tk.Tk):
                         self.season_var, self.category_var):
                 var.set("")
             self.meta_label.configure(text="")
-            self.note_label.configure(text="")
+            self._set_note("")
             self._clear_info_panel()
 
     def _plan_by_iid(self, iid: str) -> PlanItem | None:
@@ -1930,7 +1944,7 @@ class App(tk.Tk):
             for var in (self.title_var, self.year_var,
                         self.season_var, self.category_var):
                 var.set("")
-            self.note_label.configure(text="")
+            self._set_note("")
             self.meta_label.configure(text="")
             self.map_btn.configure(state="disabled")
             self.map_label.configure(text="")
@@ -1988,7 +2002,7 @@ class App(tk.Tk):
             parts.append("原因：" + "、".join(
                 qc.CODE_LABELS.get(c, c) for c in codes))
         self.meta_label.configure(text="  |  ".join(parts))
-        self.note_label.configure(text=p.note or "")
+        self._set_note(p.note or "")
         self._refresh_info_sources(p)
 
     # ------------------------------------------------------------ 影片资料
@@ -2152,6 +2166,26 @@ class App(tk.Tk):
                 self._log(f"按新规则重建失败：{err}")
 
         self.rebuild_in_background(p, done)
+
+    def _set_note(self, text: str) -> None:
+        """把备注写进限高的可滚动框（内容多于 3 行时可滚动查看）。"""
+        widget = self.note_label
+        widget.configure(state="normal")
+        widget.delete("1.0", "end")
+        if text:
+            widget.insert("1.0", text)
+        widget.configure(state="disabled")
+        # 有内容时滚回顶部，避免停留在上一次的滚动位置
+        widget.yview_moveto(0.0)
+
+    def _on_note_wheel(self, event) -> str:
+        """备注框内滚轮只滚动备注内容，不带动外层窗口。"""
+        try:
+            self.note_label.yview_scroll(
+                -1 if getattr(event, "delta", 0) > 0 else 1, "units")
+        except Exception:
+            pass
+        return "break"
 
     def _refresh_info_sources(self, plan: PlanItem) -> None:
         available = {

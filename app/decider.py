@@ -285,10 +285,56 @@ def _agrees_with_primary(c: Optional[Candidate],
         return False
     if c is primary or titles_agree(primary.title, c.title):
         return True
+    # 同一部作品被不同来源拆成不同分段时（豆瓣“灵笼 第一季” vs
+    # Bangumi“灵笼 上半季”），标题不会直接相似，但它们共有一个基础标题；
+    # 这种情况下两边都是高分命中同一批搜索词，应当都保留。
+    base_primary = _base_title(primary.title)
+    base_c = _base_title(c.title)
+    if base_primary and base_c and base_primary == base_c:
+        if _both_confident(primary, c):
+            return True
     # 中英文标题不同（IMDb 英文名 vs Bangumi 中文名）时，
     # 只要这条 Bangumi 自己也是高分命中同一个搜索词，仍可采用。
     return bool(isinstance(c.extra, dict) and
                 c.extra.get("title_score", 0) >= 0.85)
+
+
+def _base_title(title: str) -> str:
+    """去掉季/分段后缀后的基础标题：“灵笼 第一季”→“灵笼”。"""
+    text = norm_title(title)
+    if not text:
+        return ""
+    # 反复剥离末尾的分段词（与 scoring 用的是同一套词）。
+    # 注意先剥长的（“最终季”先于“季”），否则会留下半截“最终”。
+    from .scoring import _SEASON_SUFFIX_WORDS
+    words = sorted(set(_SEASON_SUFFIX_WORDS) | {"最终季", "完结季", "finalseason"},
+                   key=len, reverse=True)
+    changed = True
+    while changed and len(text) > 2:
+        changed = False
+        for word in words:
+            if text.endswith(word) and len(text) > len(word):
+                rest = text[: -len(word)]
+                # “最终”这种半截词不剥：剥完只剩片段时跳过
+                if len(rest) >= 2:
+                    text = rest
+                    changed = True
+                    break
+        trimmed = re.sub(r"[0-9一二三四五六七八九十零〇两百]+$", "", text)
+        trimmed = re.sub(r"(?:第|part|season|s|final)$", "", trimmed)
+        if trimmed != text and len(trimmed) >= 2:
+            text = trimmed
+            changed = True
+    return text
+
+
+def _both_confident(a: Candidate, b: Candidate) -> bool:
+    """两边都至少是 0.6 的标题命中，才允许按基础标题合并。"""
+    ta = float((a.extra or {}).get("title_score", 0)) \
+        if isinstance(a.extra, dict) else 0.0
+    tb = float((b.extra or {}).get("title_score", 0)) \
+        if isinstance(b.extra, dict) else 0.0
+    return min(ta, tb) >= 0.6
 
 
 def _country_from(best_bg: Optional[Candidate], bg_ok: bool,
