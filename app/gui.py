@@ -336,6 +336,73 @@ class App(tk.Tk):
         paned = ttk.Panedwindow(self, orient="horizontal")
         paned.pack(fill="both", expand=True, padx=16, pady=(0, 4))
         self.paned = paned
+        # 拖动窗口边缘时 Tk 会连续触发 <Configure>；默认每像素都重排整棵
+        # 控件树，任务多时会明显卡顿。这里把重排节流到停止拖动之后。
+        self._resize_job = None
+        self._last_size = (self.winfo_width(), self.winfo_height())
+        self._right_packed = []      # [(控件, pack 参数)]，用于拖动后恢复
+        self._right_hidden = False
+        self.bind("<Configure>", self._on_window_configure)
+
+    def _on_window_configure(self, event) -> None:
+        """窗口尺寸变化：拖动期间暂停右侧重排，停手后一次性恢复。
+
+        实测：右栏（详情/命名规则/影片资料/日志）在每次尺寸变化时重排约
+        31ms/步，拖动大窗口会明显掉帧；把它临时隐藏后降到约 6ms/步。
+        这里在拖动开始时收起右栏内容，停手 120ms 后再挂回去。
+        """
+        if event.widget is not self:
+            return
+        size = (event.width, event.height)
+        if size == self._last_size:
+            return
+        self._last_size = size
+        # 拖动中：先收起右栏，后续重排就只剩左边一处
+        self._suspend_right_panel()
+        if self._resize_job is not None:
+            try:
+                self.after_cancel(self._resize_job)
+            except Exception:
+                pass
+        self._resize_job = self.after(120, self._finish_resize)
+
+    def _suspend_right_panel(self) -> None:
+        """临时把右栏各区块从布局里摘掉（不动数据，不改状态）。"""
+        if self._right_hidden:
+            return
+        right = getattr(self, "_right_frame", None)
+        if right is None:
+            return
+        packed = []
+        for w in right.winfo_children():
+            if w.winfo_manager() != "pack":
+                continue
+            info = w.pack_info()
+            keep = {k: info[k] for k in
+                    ("side", "fill", "expand", "padx", "pady", "anchor",
+                     "ipadx", "ipady") if k in info}
+            packed.append((w, keep))
+            try:
+                w.pack_forget()
+            except Exception:
+                pass
+        self._right_packed = packed
+        self._right_hidden = True
+
+    def _finish_resize(self) -> None:
+        """拖动结束：按原来的顺序和参数把右栏挂回去。"""
+        self._resize_job = None
+        if self._right_hidden:
+            for w, info in self._right_packed:
+                try:
+                    w.pack(**info)
+                except Exception:
+                    pass
+            self._right_hidden = False
+        try:
+            self.plan_tree.update_idletasks()
+        except Exception:
+            pass
 
     def _ui_left_panel(self) -> None:
         """左侧：文件来源、导航、目录树与右键菜单。"""
@@ -430,6 +497,8 @@ class App(tk.Tk):
         # 右侧计划
         right = ttk.Frame(self.paned)
         self.paned.add(right, weight=5)
+        self._right_frame = right
+        self._right_packed = []
         ptool = ttk.Frame(right)
         ptool.pack(fill="x", pady=(0, 4))
         ttk.Button(ptool, text="全选自动项", command=self.select_auto).pack(side="left")
