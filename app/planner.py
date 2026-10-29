@@ -43,6 +43,8 @@ SPEC_CATEGORIES = {"tv", "cn_anime", "us_anime", "west_anime"}
 DOTTED_CATEGORIES = {"tv", "cn_anime", "us_anime", "west_anime"}
 # 可以作为“命名来源”的数据源；命名来源决定标题、单集副标题与特别篇顺序。
 EPISODE_NAME_SOURCES = {"douban", "bangumi", "imdb", "tmdb"}
+NAMING_SOURCE_LABELS = {"douban": "豆瓣", "bangumi": "Bangumi",
+                        "imdb": "IMDb", "tmdb": "TMDB"}
 # 额外版本目录：V2/V3 放在 ID 或目录末尾之前，例如
 # “中文名 英文名 (2020) V2 [tmdbid-123]”
 RE_FOLDER_VERSION = re.compile(
@@ -3134,6 +3136,7 @@ class Planner:
             english_title = self._english_title(plan)
             seasons = sorted({s for _, s, ep, _, _ in resolved
                               if s is not None and ep is not None})
+            source_empty = False
             for s in seasons:
                 missing = any(
                     not self._episode_subtitle(e)
@@ -3146,6 +3149,8 @@ class Planner:
                     # 绝不悄悄混入其他来源（尤其是 TMDB）的标题。
                     data = self._source_episode_titles(
                         plan, s, name_source, name_sid)
+                    if not data:
+                        source_empty = True
                 else:
                     tmdb_id = plan.identity.tmdb_id
                     fetch_titles = getattr(self.metadata,
@@ -3159,6 +3164,9 @@ class Planner:
                             data = {}
                 for ep_num, ep_title in (data or {}).items():
                     online_subs[(s, ep_num)] = ep_title
+            if source_empty:
+                label = NAMING_SOURCE_LABELS.get(name_source, name_source)
+                self._mark(plan, qc.name_source_no_episodes(label))
 
         # 季目录重命名
         if self.options.rename_season_folders and mr.season_dirs:

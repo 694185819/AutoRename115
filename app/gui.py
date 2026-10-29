@@ -80,6 +80,7 @@ DEFAULT_SETTINGS = {
     "auto_nfo_after_rename": False,
     "use_bangumi": True,
     "tmdb_key": "",
+    "douban_cookie": "",
     "douban_delay": 2.2,
     "login_app": "ios",
     "local_root": "",
@@ -205,6 +206,9 @@ class App(tk.Tk):
             tmdb_key=self.settings.get("tmdb_key", ""),
             use_bangumi=bool(self.settings.get("use_bangumi", True)),
             douban_delay=float(self.settings.get("douban_delay", 2.2)))
+        # 豆瓣分集页需要登录 Cookie 才能读“本集中文名”
+        self.meta.douban_cookie = str(
+            self.settings.get("douban_cookie", "") or "")
         self.options = NamingOptions(
             include_imdb_id=bool(self.settings.get("include_imdb_id", True)),
             imdb_id_style=self.settings.get("imdb_id_style", "jellyfin"),
@@ -4111,6 +4115,15 @@ class SettingsDialog(tk.Toplevel):
         api_link.bind("<Return>", self._open_tmdb_api)
         api_link.bind("<space>", self._open_tmdb_api)
         api_link.configure(takefocus=True)
+        ttk.Label(frame,
+                  text="豆瓣 Cookie（可选；只有“按豆瓣命名”需要）。"
+                       "粘贴浏览器里 movie.douban.com 的 Cookie 后，"
+                       "才能读豆瓣的分集页取单集名。",
+                  foreground="#555", wraplength=520).pack(anchor="w", pady=(8, 0))
+        self.douban_cookie_var = tk.StringVar(
+            value=s.get("douban_cookie", ""))
+        ttk.Entry(frame, textvariable=self.douban_cookie_var,
+                  width=60, show="•").pack(anchor="w", pady=3)
         ttk.Label(frame, text="命名规则：日番=标题 S01E01；电视剧/国产动画=标题 S01E01 [1080p WEB-DL HEVC]；电影=标题 (年份)。",
                   wraplength=520, foreground="#555").pack(anchor="w", pady=(8, 0))
         ttk.Separator(frame).pack(fill="x", pady=(10, 8))
@@ -4163,6 +4176,7 @@ class SettingsDialog(tk.Toplevel):
             "jp_folder_style": JP_LABEL_TO_KEY.get(
                 self.jp_style_var.get(), "bdremux"),
             "tmdb_key": self.tmdb_var.get().strip(),
+            "douban_cookie": self.douban_cookie_var.get().strip(),
             "login_app": self.login_app_var.get(),
         })
         self.destroy()

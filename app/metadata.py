@@ -70,6 +70,8 @@ class MetadataClient:
         self.last_request = {k: 0.0 for k in self.delays}
         self.douban_blocked_until = 0.0
         self._douban_landing_done = False
+        # 豆瓣分集页要登录才可读；留空则“按豆瓣命名”时用文件名副标题。
+        self.douban_cookie = ""
         self._load_cache()
 
     # ------------------------------------------------------------ 缓存/限速
@@ -1143,12 +1145,84 @@ class MetadataClient:
         return out
 
     def _douban_episode_titles(self, sid: str, season: int) -> dict[int, str]:
-        """豆瓣单集标题：豆瓣没有稳定的公开分集接口，这里不做联网猜测。
+        """豆瓣分集标题：解析 /subject/<sid>/episode/<N>/ 页面里的“本集中文名”。
 
-        直接返回空，命名时改用原文件名里的副标题，避免把别的来源的
-        单集标题混进豆瓣依据的文件名。
+        豆瓣分集页要登录才给内容，未登录会被挡到验证页；这里在设置了
+        `douban_cookie` 时带上 Cookie 抓一页，成功解析后先用第 1 集确认
+        可读，再按需抓后续集（受 douban 限速约束）。任一环节失败都返回空，
+        由上层改用原文件名的副标题，绝不编造。
         """
-        return {}
+        cookie = str(getattr(self, "douban_cookie", "") or "").strip()
+        if not cookie or not str(sid).isdigit():
+            return {}
+        try:
+            season = int(season)
+        except Exception:
+            return {}
+        key = f"douban:eps:{sid}:{season}"
+        cached = self._cache_get(key, 7 * 86400)
+        if cached is not None:
+            return {int(k): str(v) for k, v in cached["data"].items()}
+        out: dict[int, str] = {}
+        # 先取第 1 集：拿不到就说明未登录/被限流，直接放弃，避免无效连抓。
+        first = self._douban_episode_page(sid, season, 1)
+        if not first["ok"]:
+            self.log(f"豆瓣分集页不可读（{sid} S{season}）：{first['reason']}")
+            return {}
+        for ep in range(1, 51):
+            data = first if ep == 1 else \
+                self._douban_episode_page(sid, season, ep)
+            if not data["ok"]:
+                break
+            title = data.get("title") or ""
+            if title and not is_generic_episode_title(title):
+                out[ep] = title
+        if out:
+            self._cache_put(key, {str(k): v for k, v in out.items()})
+        return out
+
+    def _douban_episode_page(self, sid: str, season: int, ep: int) -> dict:
+        """抓一页豆瓣分集页，返回 {ok, title, reason}。
+
+        豆瓣的分集页路径只按“集”编号（/episode/<N>/），季由豆瓣条目本身
+        决定。这里不猜多季路径：如果命名来源是某一季的豆瓣条目，集号仍按
+        该条目的第 N 集取。
+        """
+        self._wait("douban")
+        url = (f"https://movie.douban.com/subject/{quote(str(sid))}"
+               f"/episode/{ep}/")
+        headers = {
+            "User-Agent": UA,
+            "Referer": f"https://movie.douban.com/subject/{sid}/",
+            "Accept": "text/html,application/xhtml+xml",
+            "Cookie": self.douban_cookie,
+        }
+        try:
+            r = self.session.get(url, headers=headers, timeout=20)
+        except Exception as e:
+            return {"ok": False, "reason": str(e)}
+        text = r.text
+        if r.status_code != 200:
+            return {"ok": False, "reason": f"HTTP {r.status_code}"}
+        if 'name="cha"' in text or "载入中" in text:
+            return {"ok": False, "reason": "需要登录或被验证页拦截"}
+        title = ""
+        m = re.search(
+            r"本集中文名\s*[:：]?\s*</?\w[^>]*>\s*([^<]{1,120})", text)
+        if not m:
+            m = re.search(r"本集中文名\s*[:：]\s*([^<]{1,120})", text)
+        if m:
+            title = self._clean_html_text(m.group(1))
+        if not title:
+            # 页面标题形如 “灵笼 第一季 第1集 灯塔和光影会(豆瓣)”
+            tm = re.search(r"<title>(.*?)</title>", text, re.S)
+            if tm:
+                raw = self._clean_html_text(tm.group(1))
+                mm = re.search(r"第\s*\d+\s*集\s*[：: ]*(.+?)\s*\(豆瓣\)",
+                               raw)
+                if mm:
+                    title = mm.group(1).strip()
+        return {"ok": True, "title": title}
 
 
     def tmdb_detail(self, tmdb_id: str, kind: str = "tv") -> Optional[dict]:

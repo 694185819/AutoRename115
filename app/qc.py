@@ -37,6 +37,7 @@ CODE_LABELS = {
     "season_unconfirmed": "季号未确认",
     "special_unmatched": "特别篇补号",
     "special_zero_guessed": "第0集猜测",
+    "name_source_no_episodes": "该来源无分集数据",
     "bdmv_inner_dir": "蓝光内部目录",
     "no_series_year": "缺首播年",
 }
@@ -134,6 +135,16 @@ SPECIAL_ZERO_GUESSED = QcResult(
 BDMV_INNER_DIR = QcResult(
     "bdmv_inner_dir", "这是蓝光结构内部目录，请选择上一级的剧集/电影文件夹。",
     BLOCK, "reselect")
+
+
+def name_source_no_episodes(label: str) -> QcResult:
+    """命名来源有条目号、但该来源拿不到单集标题时的提示（信息级）。"""
+    return QcResult(
+        "name_source_no_episodes",
+        f"{label} 没有可用的单集标题数据（豆瓣分集页需要登录），"
+        "副标题暂用原文件名；可换 Bangumi / IMDb / TMDB，"
+        "或在“季集映射…”里手工改。",
+        INFO, "review_mapping")
 NO_SUB_TITLE = QcResult(
     "no_series_year", "已还原主剧名，但没找到首播年份。", INFO, "none")
 

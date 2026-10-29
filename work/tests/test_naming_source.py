@@ -27,6 +27,7 @@ class FakeMeta:
         m.source_refs = {
             "tmdb": {"id": "91097", "title": "灵笼", "year": 2019},
             "imdb": {"id": "tt10827146", "title": "Ling Cage", "year": 2019},
+            "douban": {"id": "27121260", "title": "灵笼 第一季", "year": 2019},
         }
         return m
 
@@ -146,11 +147,26 @@ def test_specials_follow_source():
     assert plan.status == "review", plan.status
 
 
+def test_source_without_episodes_is_reported():
+    """命名来源有条目号却拿不到单集标题时，要在任务里明确提示。"""
+    root, client = build(["灵笼 第01集.mp4"])   # 文件名不带副标题
+    meta = FakeMeta()
+    planner = Planner(meta, NamingOptions())
+    plan = planner.analyze(client, [root])[0]
+
+    plan.name_source = "douban"        # FakeMeta 的豆瓣没有分集数据
+    planner.rebuild(plan)
+    assert "name_source_no_episodes" in plan.qc_codes, plan.qc_codes
+    assert "没有可用的单集标题数据" in plan.note, plan.note
+    assert "豆瓣" in plan.note, plan.note
+
+
 def main():
     test_default_uses_tmdb()
     test_naming_source_switches_to_imdb()
     test_back_to_auto_restores_tmdb()
     test_specials_follow_source()
+    test_source_without_episodes_is_reported()
     print("NAMING SOURCE OK")
 
 
