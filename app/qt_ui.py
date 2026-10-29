@@ -41,6 +41,12 @@ SHORT_CATEGORY = {
     "us_anime": "美漫", "west_anime": "欧美",
     "tv": "电视剧", "movie": "电影",
 }
+SOURCE_NAMES = {
+    "douban": "豆瓣",
+    "bangumi": "Bangumi",
+    "imdb": "IMDb",
+    "tmdb": "TMDB",
+}
 COLUMNS = ("选", "类型", "分类", "当前名称", "新名称", "季", "集", "置信度", "状态")
 
 
@@ -484,39 +490,50 @@ class ManualSearchDialog(QDialog):
         self.btn_search.setEnabled(False)
         self.lbl_hint.setText("搜索中…")
         app = self.app
-        media = getattr(self.plan, "media_type", "series")
+        plan = self.plan
+        media = getattr(plan, "media_type", "series")
+        season = getattr(plan, "season", None)
+        if season is None:
+            seasons = getattr(plan, "seasons", None) or []
+            season = seasons[0] if len(seasons) == 1 else None
+        year = getattr(plan, "year", None)
 
         def worker():
-            out = []
+            from app.search_service import search_all
             meta = getattr(app, "meta", None)
             if meta is None:
-                QTimer.singleShot(0, lambda: self._show([], "未连接资料来源"))
+                self._sig_emit(lambda: self._show([], "未连接资料来源"))
                 return
-            for name, fn_name in (("豆瓣", "search_douban"),
-                                  ("Bangumi", "search_bangumi"),
-                                  ("IMDb", "search_imdb"),
-                                  ("TMDB", "search_tmdb")):
-                fn = getattr(meta, fn_name, None)
-                if not callable(fn):
-                    continue
-                try:
-                    for c in (fn(query) or [])[:15]:
-                        out.append(c)
-                except Exception as e:      # noqa: BLE001
-                    log = getattr(app, "log_threadsafe", None)
-                    if log:
-                        log(f"{name} 搜索失败：{e}")
-            QTimer.singleShot(0, lambda: self._show(out, ""))
+            try:
+                found, notes = search_all(
+                    meta, query, keywords=[],
+                    media_type=media, season=season, year=year,
+                    use_bangumi=bool(getattr(meta, "use_bangumi", True)),
+                    tmdb_key=str(getattr(meta, "tmdb_key", "") or ""),
+                    status=lambda s: self._sig_emit(
+                        lambda: self.lbl_hint.setText(s)))
+                self._sig_emit(lambda: self._show(
+                    found, "", "；".join(notes)))
+            except Exception as e:      # noqa: BLE001
+                self._sig_emit(lambda: self._show([], f"搜索失败：{e}"))
 
-        import threading
         threading.Thread(target=worker, daemon=True).start()
 
-    def _show(self, cands: list, err: str) -> None:
+    def _sig_emit(self, fn) -> None:
+        """从后台线程回到界面线程。"""
+        if getattr(self, "_sig", None) is None:
+            self._sig = _UiSignal()
+            self._sig.fn.connect(
+                lambda f: f() if callable(f) else None)
+        self._sig.fn.emit(fn)
+
+    def _show(self, cands: list, err: str, notes: str = "") -> None:
         self._candidates = cands
         self.btn_search.setEnabled(True)
         self.table.setRowCount(len(cands))
         for i, c in enumerate(cands):
-            vals = (getattr(c, "source", ""),
+            vals = (SOURCE_NAMES.get(getattr(c, "source", ""),
+                                     getattr(c, "source", "")),
                     getattr(c, "title", ""),
                     getattr(c, "original_title", ""),
                     str(getattr(c, "year", "") or ""),
@@ -524,7 +541,9 @@ class ManualSearchDialog(QDialog):
             for col, v in enumerate(vals):
                 self.table.setItem(i, col, QTableWidgetItem(str(v)))
         if cands:
-            self.lbl_hint.setText(f"共 {len(cands)} 条结果，双击或点“应用所选”。")
+            self.lbl_hint.setText(
+                f"共 {len(cands)} 条（已按相关度排序）"
+                + (f"｜{notes}" if notes else ""))
         else:
             self.lbl_hint.setText(err or "没有找到结果，换个关键词试试。")
 

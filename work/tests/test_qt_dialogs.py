@@ -70,7 +70,9 @@ def main():
     sd._show(cands, "")
     assert sd.table.rowCount() == 2
     assert sd.table.item(0, 1).text() == "灵笼 第一季"
-    assert sd.table.item(1, 0).text() == "bangumi"
+    # 来源列显示友好的中文名（不再是内部键 bangumi/douban）
+    assert sd.table.item(0, 0).text() == "豆瓣", sd.table.item(0, 0).text()
+    assert sd.table.item(1, 0).text() == "Bangumi", sd.table.item(1, 0).text()
     sd.table.selectRow(0)
     app.processEvents()
     assert sd.btn_apply.isEnabled()
