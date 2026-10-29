@@ -723,6 +723,7 @@ class App(tk.Tk):
         "media_details": "_on_media_details",
         "nfo_save": "_on_nfo_save",
         "nfo_clear": "_on_nfo_clear",
+        "rebuild_done": "_on_rebuild_done",
     }
 
     def _handle(self, kind: str, payload) -> None:
@@ -966,7 +967,9 @@ class App(tk.Tk):
                     parent=self)
                 return
         if self.busy:
-            messagebox.showinfo(APP_TITLE, "当前有任务在执行，请稍候。", parent=self)
+            # 不弹窗：连续点按钮时弹窗会堆积并打断操作。
+            self._log("上一个任务还在执行，本次操作已跳过。")
+            self.status_var.set("有任务在执行，本次操作已跳过")
             return
         self._set_busy(True)
         self._progress_begin(determinate)
@@ -2017,20 +2020,75 @@ class App(tk.Tk):
         label = SOURCE_LABELS.get(source, source) if source else "自动"
         p.name_source = source
         p.title_override = ""       # 来源标题优先，清掉旧的人工标题覆盖
-        try:
-            self.planner.rebuild(p)
-        except Exception as e:
-            self._log(f"按来源重建失败：{e}")
         self.name_by_source_var.set(bool(source))
-        self._render_plans()
-        self._plan_selected()
-        if source:
-            self._log(f"已改为按 {label} 命名：标题、单集副标题、"
-                      "特别篇顺序都以该来源为准。")
-            self.status_var.set(f"命名来源：{label}")
-        else:
-            self._log("已取消按来源命名，恢复自动匹配。")
-            self.status_var.set("命名来源：自动匹配")
+
+        def done(ok: bool, err: str) -> None:
+            if not ok:
+                self._log(f"按来源重建失败：{err}")
+            self._render_plans()
+            self._plan_selected()
+            if source:
+                self._log(f"已改为按 {label} 命名：标题、单集副标题、"
+                          "特别篇顺序都以该来源为准。")
+                self.status_var.set(f"命名来源：{label}")
+            else:
+                self._log("已取消按来源命名，恢复自动匹配。")
+                self.status_var.set("命名来源：自动匹配")
+
+        self.rebuild_in_background(p, done)
+
+    def rebuild_in_background(self, p: PlanItem, done=None,
+                              determinate: bool = False) -> None:
+        """在后台线程重建预览，避免联网取单集标题时把界面卡死。
+
+        以前 rebuild 直接在 Tk 主线程里跑；按来源命名要请求豆瓣/Bangumi/
+        IMDb 的单集页，网络一慢整个窗口就会无响应（并一直提示“有任务在执行”）。
+        """
+        if self.busy:
+            # 只记日志、不弹窗：弹窗会打断批量操作，也会卡住自动化测试。
+            self._log("上一个操作还在进行，本次重建已跳过；完成后再试。")
+            self.status_var.set("有任务在执行，本次重建已跳过")
+            if done:
+                done(False, "busy")
+            return
+        planner = self.planner
+
+        def task():
+            try:
+                planner.rebuild(p)
+                return True, ""
+            except Exception as e:
+                return False, str(e)
+
+        self._rebuild_callback = done
+        self.run_async(task, "rebuild_done", determinate=determinate)
+
+    def wait_for_rebuild(self, timeout: float = 20.0) -> bool:
+        """等待后台重建结束（测试与脚本用；界面里不需要调用）。"""
+        import time as _time
+        end = _time.time() + max(0.1, float(timeout))
+        while _time.time() < end:
+            self.update()
+            if not self.busy:
+                return True
+            _time.sleep(0.02)
+        return False
+
+    def _on_rebuild_done(self, payload) -> None:
+        ok, err = payload if isinstance(payload, tuple) else (True, "")
+        # 后台重建结束后必须解除忙碌，否则后续操作会一直被
+        # “当前有任务在执行”挡住（这次卡死问题的一半原因）。
+        self._set_busy(False)
+        fn = getattr(self, "_rebuild_callback", None)
+        self._rebuild_callback = None
+        if ok:
+            self._render_plans()
+            self._plan_selected()
+        elif err and err != "busy":
+            # 只有真正的异常才用户可见；"busy" 是调用方主动放弃，不弹窗。
+            self._log(f"重建预览失败：{err}")
+        if callable(fn):
+            fn(ok, err)
 
     def _refresh_info_sources(self, plan: PlanItem) -> None:
         available = {
@@ -2608,11 +2666,17 @@ class App(tk.Tk):
         p.category = LABEL_TO_CATEGORY.get(self.category_var.get(), "auto")
         if season is not None:
             p.season_confirmed = True
-        self.planner.rebuild(p)
-        if p.ops:
-            p.selected = True
-        self._render_plans()
-        self._log(f"已重新生成预览：{p.title}（{len(p.ops)} 个操作）")
+
+        def done(ok: bool, err: str) -> None:
+            if not ok:
+                self._log(f"重新生成预览失败：{err}")
+                return
+            if p.ops:
+                p.selected = True
+            self._render_plans()
+            self._log(f"已重新生成预览：{p.title}（{len(p.ops)} 个操作）")
+
+        self.rebuild_in_background(p, done)
 
     # ------------------------------------------------------------ 季集映射
     def open_episode_mapping(self) -> None:
@@ -2642,10 +2706,14 @@ class App(tk.Tk):
         p.note = "；".join(parts)
         p.status = ("auto" if p.confidence >= self.options.min_auto_confidence
                     else "review")
-        self.planner.rebuild(p)
-        self._render_plans()
-        self._plan_selected()
-        self._log(f"季集映射已应用：{p.title}（{len(p.ops)} 个操作）")
+
+        def done(ok: bool, err: str) -> None:
+            if not ok:
+                self._log(f"季集映射重建失败：{err}")
+                return
+            self._log(f"季集映射已应用：{p.title}（{len(p.ops)} 个操作）")
+
+        self.rebuild_in_background(p, done)
 
     # ------------------------------------------------------------ 手动搜索
     @staticmethod
@@ -2943,13 +3011,19 @@ class App(tk.Tk):
         kept = [n for n in (p.note or "").split("；")
                 if n and not any(d in n for d in drop)]
         p.note = "；".join(dict.fromkeys(kept + m.notes))
-        self.planner.rebuild(p)
-        if p.ops:
-            p.selected = True
-        self._render_plans()
-        self._log(f"已应用手动搜索结果：{base}"
-                  + (f" ({year})" if year else "")
-                  + f"，{len(p.ops)} 个操作")
+
+        def done(ok: bool, err: str) -> None:
+            if not ok:
+                self._log(f"应用手动搜索结果失败：{err}")
+                return
+            if p.ops:
+                p.selected = True
+            self._render_plans()
+            self._log(f"已应用手动搜索结果：{base}"
+                      + (f" ({year})" if year else "")
+                      + f"，{len(p.ops)} 个操作")
+
+        self.rebuild_in_background(p, done)
 
     # ------------------------------------------------------------ 临时改名
     def temp_rename(self) -> None:

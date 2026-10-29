@@ -34,6 +34,7 @@ for iid in rows:
         app.update()
         app.season_var.set("4")
         app.rebuild_detail()
+        app.wait_for_rebuild()
         app.update()
         print("AoT title:", app.title_var.get(), "season:", app.season_var.get(),
               "selected:", p.selected, "status:", p.status)
@@ -50,6 +51,7 @@ for iid in rows:
         app.update()
         app.category_var.set("电视剧（中英+副标题）")
         app.rebuild_detail()
+        app.wait_for_rebuild()
         app.update()
         print("Frieren category:", p.category)
         for op in p.ops:

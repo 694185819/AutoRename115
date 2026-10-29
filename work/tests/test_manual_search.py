@@ -67,6 +67,7 @@ def main():
         Candidate(source="bangumi", title="冰菓", original_title="氷菓",
                   year=2012, sid="400602", kind="tv"),
         {"imdb_id": "tt2340841", "tmdb_id": "", "country": "jp"})
+    app.wait_for_rebuild()
     app.update()
     assert p.title == "冰菓", p.title
     assert p.year == 2012, p.year
