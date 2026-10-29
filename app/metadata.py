@@ -194,53 +194,57 @@ class MetadataClient:
 
         out: list[Candidate] = []
         error = ""
+        # 主路径：豆瓣网页搜索（结果多、标题准确）。
+        # 旧版先请求 subject_suggest（输入框联想补全），它是“字面相近”
+        # 的模糊结果，经常漏掉目标作品，还会带回大量无关条目。
         try:
-            url = "https://movie.douban.com/j/subject_suggest"
-            data = self._get_json(url, "douban", params={"q": query},
-                                  referer="https://movie.douban.com/")
-            items = data if isinstance(data, list) else []
-            for it in items[:12]:
-                ep = str(it.get("episode", "") or "")
-                kind = "tv" if ep.isdigit() and int(ep) > 0 else "movie"
-                year = None
-                if str(it.get("year", "")).isdigit():
-                    year = int(it["year"])
-                out.append(Candidate(
-                    source="douban", title=str(it.get("title", "")).strip(),
-                    original_title=str(it.get("sub_title", "") or "").strip(),
-                    year=year, sid=str(it.get("id", "")), kind=kind,
-                    episodes=int(ep) if ep.isdigit() else 0,
-                    url=str(it.get("url", "")),
-                    extra={"img": it.get("img", "")}))
+            out = self._douban_html_search(query)
         except Exception as e:
             error = str(e)
 
-        # subject_suggest 常常只给第一季/第三季；搜索页能一次给全四季。
-        if len(out) < 4:
+        # 网页搜索不可用时，退回联想补全（只作为兜底，不再作为主路径）
+        if not out:
             try:
-                extra = self._douban_html_search(query)
-                by_sid = {c.sid: c for c in out}
-                for c in extra:
-                    old = by_sid.get(c.sid)
-                    if old is None:
-                        out.append(c)
-                        by_sid[c.sid] = c
-                        continue
-                    # subject_suggest 没有“动画/真人”信息，用搜索页补上
-                    if isinstance(old.extra, dict) and \
-                            isinstance(c.extra, dict):
-                        for k, v in c.extra.items():
-                            if v not in (None, "", []):
-                                old.extra[k] = v
-                    if not old.original_title and c.original_title:
-                        old.original_title = c.original_title
-                    if old.year is None and c.year:
-                        old.year = c.year
+                url = "https://movie.douban.com/j/subject_suggest"
+                data = self._get_json(url, "douban", params={"q": query},
+                                      referer="https://movie.douban.com/")
+                for it in (data if isinstance(data, list) else [])[:12]:
+                    ep = str(it.get("episode", "") or "")
+                    kind = "tv" if ep.isdigit() and int(ep) > 0 else "movie"
+                    year = None
+                    if str(it.get("year", "")).isdigit():
+                        year = int(it["year"])
+                    out.append(Candidate(
+                        source="douban",
+                        title=str(it.get("title", "")).strip(),
+                        original_title=str(it.get("sub_title", "") or "").strip(),
+                        year=year, sid=str(it.get("id", "")), kind=kind,
+                        episodes=int(ep) if ep.isdigit() else 0,
+                        url=str(it.get("url", "")),
+                        extra={"img": it.get("img", "")}))
             except Exception as e:
                 error = error or str(e)
 
         if out:
             self.delays["douban"] = max(2.0, self.delays["douban"] * 0.85)
+            # 按与搜索词的相关性排序：标题完全一致 > 以搜索词开头 >
+            # 包含搜索词 > 其它模糊命中（如“更美好的事”）。这样列表顶部
+            # 就是真正要的条目，不用在无关结果里翻找。
+            qn = norm_title(query)
+            if qn:
+                def _rank(c: Candidate) -> tuple:
+                    tn = norm_title(c.title or "")
+                    on = norm_title(c.original_title or "")
+                    if qn in (tn, on):
+                        tier = 0
+                    elif tn.startswith(qn) or (on and on.startswith(qn)):
+                        tier = 1
+                    elif qn in tn or (on and qn in on):
+                        tier = 2
+                    else:
+                        tier = 3
+                    return (tier, 0 if c.kind == "tv" else 1, c.title or "")
+                out.sort(key=_rank)
             self._cache_put(key, [c.__dict__ for c in out])
             return out
 
