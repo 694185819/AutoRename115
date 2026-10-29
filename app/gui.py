@@ -199,6 +199,39 @@ class App(tk.Tk):
         with open(p, "w", encoding="utf-8") as f:
             json.dump(self.settings, f, ensure_ascii=False, indent=1)
 
+    def _pick_browser_profile(self) -> str:
+        """挑选带“用户登录态 + 暴力猴”的浏览器配置目录。
+
+        优先级：
+        1. 装过暴力猴扩展（jinjaccalgkegednnccohejagnlnfdag）且已有 Cookie 的；
+        2. 装过暴力猴的；
+        3. 任意带 Default 的配置。
+        都没有就返回空串（此时程序走普通标题搜索）。
+        """
+        base = os.path.join(self.data_dir, "browser_profile")
+        vm_id = "jinjaccalgkegednnccohejagnlnfdag"
+        best = ""
+        best_rank = -1
+        try:
+            names = sorted(os.listdir(base))
+        except Exception:
+            return ""
+        for name in names:
+            prof = os.path.join(base, name)
+            default = os.path.join(prof, "Default")
+            if not os.path.isdir(default):
+                continue
+            has_vm = os.path.isdir(os.path.join(default, "Extensions",
+                                                vm_id))
+            cookie = os.path.join(default, "Cookies")
+            has_cookie = os.path.isfile(cookie) and \
+                os.path.getsize(cookie) > 1000
+            rank = (2 if has_vm and has_cookie else
+                    1 if has_vm else 0)
+            if rank > best_rank:
+                best, best_rank = prof, rank
+        return best
+
     def _init_meta(self) -> None:
         self.meta = MetadataClient(
             os.path.join(self.data_dir, "metadata_cache.json"),
@@ -209,6 +242,10 @@ class App(tk.Tk):
         # 豆瓣分集页需要登录 Cookie 才能读“本集中文名”
         self.meta.douban_cookie = str(
             self.settings.get("douban_cookie", "") or "")
+        # 豆瓣登录态所在的浏览器配置目录：登录后条目页会显示
+        # IMDb / TMDB 关联编号，程序据此直接定位，避免标题模糊匹配。
+        # 优先用“装过暴力猴且登录过”的配置，其次才是默认配置。
+        self.meta.browser_profile_dir = self._pick_browser_profile()
         self.options = NamingOptions(
             include_imdb_id=bool(self.settings.get("include_imdb_id", True)),
             imdb_id_style=self.settings.get("imdb_id_style", "jellyfin"),

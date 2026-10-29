@@ -312,6 +312,29 @@ class SettingsDialog(QDialog):
         btn_test.clicked.connect(self._test_douban)
         lay.addWidget(box2)
 
+        # ---- 豆瓣登录（读取 IMDb/TMDB 关联）
+        box2b = QGroupBox("豆瓣登录（读取 IMDb/TMDB 关联 ID）")
+        f2b = QVBoxLayout(box2b)
+        tip2 = QLabel("登录后，条目页会显示 IMDb / TMDB 编号，程序可直接用编号"
+                      "定位影片，比按标题搜索准确得多。\n"
+                      "登录在独立窗口里进行，登录态只保存在本机程序目录。")
+        tip2.setWordWrap(True)
+        tip2.setStyleSheet("color:#777;")
+        f2b.addWidget(tip2)
+        row2 = QHBoxLayout()
+        self.btn_douban_login = QPushButton("打开登录窗口…")
+        self.btn_douban_check = QPushButton("检查登录状态")
+        row2.addWidget(self.btn_douban_login)
+        row2.addWidget(self.btn_douban_check)
+        row2.addStretch(1)
+        f2b.addLayout(row2)
+        self.lbl_douban_login = QLabel("未检测")
+        self.lbl_douban_login.setWordWrap(True)
+        f2b.addWidget(self.lbl_douban_login)
+        self.btn_douban_login.clicked.connect(self._open_douban_login)
+        self.btn_douban_check.clicked.connect(self._check_douban_login)
+        lay.addWidget(box2b)
+
         # ---- TMDB
         box3 = QGroupBox("TMDB（可选）")
         f3 = QHBoxLayout(box3)
@@ -345,6 +368,14 @@ class SettingsDialog(QDialog):
         lay.addLayout(btns)
         btn_ok.clicked.connect(self.save)
         btn_cancel.clicked.connect(self.reject)
+
+    def _sig_emit(self, fn) -> None:
+        """从后台线程回到界面线程执行。"""
+        if getattr(self, "_sig", None) is None:
+            self._sig = _UiSignal()
+            self._sig.fn.connect(
+                lambda f: f() if callable(f) else None)
+        self._sig.fn.emit(fn)
 
     # ---------------- 动作
     def _paste_cookie(self) -> None:
@@ -394,6 +425,69 @@ class SettingsDialog(QDialog):
             self.lbl_douban.setText(
                 f"豆瓣不可读：{page.get('reason') or '未知原因'}")
             self.lbl_douban.setStyleSheet("color:#b3261e;")
+
+    def _open_douban_login(self) -> None:
+        """开一个可见浏览器窗口让用户登录豆瓣。"""
+        self.lbl_douban_login.setText("正在打开登录窗口…")
+        self.lbl_douban_login.setStyleSheet("color:#555;")
+
+        def worker():
+            from app.douban_browser import open_login_window
+            try:
+                browser = open_login_window(
+                    getattr(self.app, "app_dir", "."), log=lambda s: None)
+            except Exception as e:      # noqa: BLE001
+                self._sig_emit(lambda: self.lbl_douban_login.setText(
+                    f"打开失败：{e}"))
+                return
+            if browser is None:
+                self._sig_emit(lambda: self.lbl_douban_login.setText(
+                    "打开失败：找不到 Chrome 或 Edge。"))
+                return
+            self._sig_emit(lambda: self.lbl_douban_login.setText(
+                "登录窗口已打开：请在其中登录豆瓣，完成后点“检查登录状态”。"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _check_douban_login(self) -> None:
+        """检查豆瓣登录态，并试读一个已知条目的关联 ID。"""
+        self.lbl_douban_login.setText("检查中…")
+        self.lbl_douban_login.setStyleSheet("color:#555;")
+
+        def worker():
+            import os
+
+            from app.douban_browser import (DoubanBrowser, is_logged_in,
+                                            related_ids_from_douban)
+            profile = os.path.join(getattr(self.app, "app_dir", "."),
+                                   "data", "browser_profile")
+            b = DoubanBrowser(user_dir=profile, headless=True)
+            ok = False
+            ids = {}
+            try:
+                if not b.start():
+                    self._sig_emit(lambda: self.lbl_douban_login.setText(
+                        "检查失败：无法启动浏览器。"))
+                    return
+                ok = is_logged_in(b)
+                if ok:
+                    ids = related_ids_from_douban(b, "27121260")
+            finally:
+                b.stop()
+            if ok:
+                detail = (f"，示例读到 IMDb {ids['imdb_id']}"
+                          if ids.get("imdb_id") else "")
+                msg, color = f"已登录豆瓣{detail}。", "#176b33"
+            else:
+                msg = "未登录。请在登录窗口里登录一次豆瓣。"
+                color = "#b3261e"
+
+            def show():
+                self.lbl_douban_login.setText(msg)
+                self.lbl_douban_login.setStyleSheet(f"color:{color};")
+            self._sig_emit(show)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def save(self) -> None:
         values = {

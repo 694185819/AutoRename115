@@ -146,13 +146,21 @@ class _WS:
 
 
 class DoubanBrowser:
-    """按需启动的本机浏览器，用于读取豆瓣分集页。"""
+    """按需启动的本机浏览器，用于读取豆瓣页面。
 
-    def __init__(self, log=None):
+    默认无界面（headless），适合后台取分集名；
+    `headless=False` 时开一个可见窗口，供用户手动登录豆瓣，
+    登录态保存在 `user_dir` 里，后续读取条目页就能看到“关联站点”。
+    """
+
+    def __init__(self, log=None, user_dir: Optional[str] = None,
+                 headless: bool = True):
         self.log = log or (lambda s: None)
         self.proc: Optional[subprocess.Popen] = None
         self.port = 0
-        self.user_dir = os.path.join(tempfile.gettempdir(), "AutoRename115_browser")
+        self.user_dir = user_dir or os.path.join(
+            tempfile.gettempdir(), "AutoRename115_browser")
+        self.headless = headless
         self.ws: Optional[_WS] = None
         self.tab_ws: Optional[_WS] = None
 
@@ -173,10 +181,16 @@ class DoubanBrowser:
         except Exception:
             self.user_dir = tempfile.mkdtemp(prefix="arn115_browser_")
         args = [exe, f"--remote-debugging-port={self.port}",
-                f"--user-data-dir={self.user_dir}", "--headless=new",
-                "--disable-gpu", "--no-first-run",
-                "--no-default-browser-check", "about:blank"]
-        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                f"--user-data-dir={self.user_dir}"]
+        if self.headless:
+            args += ["--headless=new", "--disable-gpu"]
+        else:
+            # 可见模式：用于让用户手动登录豆瓣，登录态会存进 user_dir。
+            args += ["--window-size=1100,820", "--window-position=80,60"]
+        args += ["--no-first-run", "--no-default-browser-check",
+                 "about:blank"]
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) \
+            if self.headless else 0
         self.proc = subprocess.Popen(args, stdout=subprocess.DEVNULL,
                                      stderr=subprocess.DEVNULL,
                                      creationflags=flags)
@@ -261,6 +275,98 @@ class DoubanBrowser:
 def re_ep_title(title: str) -> bool:
     import re
     return bool(re.search(r"第\s*\d+\s*集", title or ""))
+
+
+# ---------------------------------------------------------------- 登录与关联 ID
+def open_login_window(app_dir: str, log=None) -> Optional[DoubanBrowser]:
+    """开一个可见浏览器让用户登录豆瓣，登录态保存在程序目录下。
+
+    返回已启动的浏览器对象（调用方负责 `stop()`），失败返回 None。
+    """
+    profile = os.path.join(app_dir, "data", "browser_profile")
+    os.makedirs(profile, exist_ok=True)
+    browser = DoubanBrowser(log=log, user_dir=profile, headless=False)
+    if not browser.start():
+        return None
+    tab = browser._open("https://accounts.douban.com/passport/login")
+    if tab is None:
+        browser.stop()
+        return None
+    try:
+        tab.close()
+    except Exception:
+        pass
+    return browser
+
+
+def _read_page_text(browser: "DoubanBrowser", url: str,
+                    timeout: float = 25.0,
+                    ready=lambda text: bool(text.strip())) -> str:
+    """打开页面并等它真正渲染出内容，返回正文文本。"""
+    tab = browser._open(url)
+    if tab is None:
+        return ""
+    try:
+        end = time.time() + timeout
+        while time.time() < end:
+            msg = tab.call("Runtime.evaluate",
+                           {"expression": "document.body ? "
+                                          "document.body.innerText : ''",
+                            "returnByValue": True}, timeout=15)
+            text = ((msg.get("result") or {}).get("result") or {}) \
+                .get("value") or ""
+            if ready(text):
+                return str(text)
+            time.sleep(0.6)
+        return str(text or "")
+    except Exception as e:      # noqa: BLE001
+        browser.log(f"读取页面失败：{e}")
+        return ""
+    finally:
+        try:
+            tab.close()
+        except Exception:
+            pass
+
+
+def is_logged_in(browser: "DoubanBrowser") -> bool:
+    """检查浏览器当前是否已登录豆瓣。"""
+    text = _read_page_text(browser, "https://www.douban.com/",
+                           timeout=15)
+    if not text:
+        return False
+    # 登录后首页不再显示“登录/注册”
+    return "登录/注册" not in text[:400]
+
+
+def related_ids_from_douban(browser: "DoubanBrowser",
+                            sid: str) -> dict:
+    """从豆瓣条目页读取关联的 IMDb / TMDB ID。
+
+    登录状态下条目页有“关联站点”区，形如：
+        IMDb: tt5370118   TMDB: 65844
+    未登录时该区域不渲染，此时返回空 dict。
+    """
+    import re
+    url = f"https://movie.douban.com/subject/{sid}/"
+    text = _read_page_text(browser, url, timeout=25,
+                           ready=lambda t: "IMDb" in t or "TMDB" in t
+                           or "又名" in t)
+    if not text:
+        return {}
+    out: dict[str, str] = {}
+    m = re.search(r"IMDb:\s*(tt\d{6,9})", text)
+    if m:
+        out["imdb_id"] = m.group(1)
+    m = re.search(r"TMDB:\s*(\d{2,9})", text)
+    if m:
+        out["tmdb_id"] = m.group(1)
+    # 兜底：页面上任何 IMDb/TMDB 链接
+    if "imdb_id" not in out:
+        m = re.search(r"tt\d{6,9}", text)
+        if m:
+            out["imdb_id"] = m.group(0)
+    return out
 
 
 def episode_name_from_title(title: str) -> str:

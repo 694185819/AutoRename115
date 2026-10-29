@@ -72,7 +72,41 @@ class MetadataClient:
         self._douban_landing_done = False
         # 豆瓣分集页要登录才可读；留空则“按豆瓣命名”时用文件名副标题。
         self.douban_cookie = ""
+        # 豆瓣登录态（浏览器配置目录）：有值时可用登录后的条目页
+        # 读取 IMDb / TMDB 关联编号，直接按编号定位，避免标题模糊匹配。
+        self.browser_profile_dir = ""
+        self._related_cache: dict[str, dict] = {}
         self._load_cache()
+
+    # ------------------------------------------------------------ 豆瓣关联 ID
+    def douban_related_ids(self, sid: str) -> dict:
+        """读取豆瓣条目页里的 IMDb / TMDB 关联编号。
+
+        需要本机浏览器已登录豆瓣（`browser_profile_dir` 指向其配置目录）。
+        未登录或读不到时返回空 dict，调用方照常走标题搜索。
+        """
+        sid = str(sid or "").strip()
+        if not sid.isdigit() or not self.browser_profile_dir:
+            return {}
+        if sid in self._related_cache:
+            return dict(self._related_cache[sid])
+        try:
+            from .douban_browser import DoubanBrowser, related_ids_from_douban
+            b = DoubanBrowser(user_dir=self.browser_profile_dir,
+                              headless=True, log=self.log)
+            if not b.start():
+                return {}
+            try:
+                ids = related_ids_from_douban(b, sid)
+            finally:
+                b.stop()
+        except Exception as e:      # noqa: BLE001
+            self.log(f"读取豆瓣关联编号失败（{sid}）：{e}")
+            return {}
+        if ids:
+            self.log(f"豆瓣 {sid} 关联编号：{ids}")
+        self._related_cache[sid] = dict(ids)
+        return ids
 
     # ------------------------------------------------------------ 缓存/限速
     def _load_cache(self) -> None:
@@ -1816,4 +1850,53 @@ class MetadataClient:
         res = decider.decide(parsed, media_type, category, pools, self.log)
         decider.identify_series(parsed, media_type, res,
                                 self._series_identity)
+        self._apply_douban_related_ids(res, media_type)
         return res
+
+    def _apply_douban_related_ids(self, res: MatchResult,
+                                  media_type: str = "series") -> None:
+        """用豆瓣条目页的关联编号补全 IMDb / TMDB。
+
+        标题搜索容易撞上同系列外传（“祝福”vs“爆焰”），而豆瓣条目页
+        在登录状态下会写明 IMDb / TMDB 编号；拿到编号就能直接定位，
+        不再依赖标题相似度。
+        """
+        db = getattr(res, "douban", None)
+        if db is None or not getattr(db, "sid", ""):
+            return
+        ids = self.douban_related_ids(db.sid)
+        if not ids:
+            return
+        imdb_id = ids.get("imdb_id") or ""
+        tmdb_id = ids.get("tmdb_id") or ""
+        if imdb_id and not (res.imdb and res.imdb.sid == imdb_id):
+            cand = Candidate(
+                source="imdb", title=(res.imdb.title if res.imdb else
+                                      (db.original_title or db.title)),
+                original_title="", year=res.imdb.year if res.imdb else db.year,
+                sid=imdb_id, kind="tv" if media_type == "series"
+                else "movie",
+                url=f"https://www.imdb.com/title/{imdb_id}/", extra={})
+            cand.score = 1.0
+            cand.extra["title_score"] = 1.0
+            cand.extra["via_douban_related"] = True
+            res.imdb = cand
+            res.notes.append(f"IMDb 编号来自豆瓣关联：{imdb_id}")
+        if tmdb_id and not (res.tmdb and res.tmdb.sid == tmdb_id):
+            cand = Candidate(
+                source="tmdb", title=(res.tmdb.title if res.tmdb else
+                                      (db.title or "")),
+                original_title="", year=res.tmdb.year if res.tmdb else db.year,
+                sid=tmdb_id, kind="tv" if media_type == "series"
+                else "movie",
+                url=f"https://www.themoviedb.org/tv/{tmdb_id}", extra={})
+            cand.score = 1.0
+            cand.extra["title_score"] = 1.0
+            cand.extra["via_douban_related"] = True
+            res.tmdb = cand
+            res.notes.append(f"TMDB 编号来自豆瓣关联：{tmdb_id}")
+        if imdb_id or tmdb_id:
+            try:
+                res.source_refs.setdefault("douban", {})["related"] = ids
+            except Exception:
+                pass

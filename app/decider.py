@@ -105,11 +105,20 @@ def filter_by_movie_year(parsed: ParsedName, media_type: str,
 
 
 def _pick_one(pools: dict[str, list[Candidate]], media_type: str,
-              picker) -> tuple[Optional[Candidate], Optional[Candidate],
-                               Optional[Candidate]]:
-    return (picker(pools.get("bangumi", []), media_type),
-            picker(pools.get("douban", []), media_type),
-            picker(pools.get("tmdb", []), media_type))
+              picker,
+              want_season: Optional[int] = None) -> tuple[
+                  Optional[Candidate], Optional[Candidate],
+                  Optional[Candidate]]:
+    """在三个来源里各挑一个；指定了季号时优先挑季号匹配的条目。"""
+    def call(cands: list[Candidate]) -> Optional[Candidate]:
+        try:
+            return picker(cands, media_type, want_season)
+        except TypeError:
+            return picker(cands, media_type)
+
+    return (call(pools.get("bangumi", [])),
+            call(pools.get("douban", [])),
+            call(pools.get("tmdb", [])))
 
 
 def decide(parsed: ParsedName, media_type: str, category: str,
@@ -139,7 +148,8 @@ def decide(parsed: ParsedName, media_type: str, category: str,
     anchors = scoring.anchor_titles(parsed)
 
     best_bg, best_db, best_tmdb = _pick_one(
-        scoring_pools, media_type, scoring.pick_primary)
+        scoring_pools, media_type, scoring.pick_primary,
+        want_season=parsed.season if media_type == "series" else None)
     if not any((best_bg, best_db, best_tmdb)):
         # 严格锚点把全部候选都淘汰时，再给一次“整串组合名”机会：
         # 本地是“异国日记 Ikoku Nikki”而官方只有英文名时，严格
@@ -300,13 +310,15 @@ def _agrees_with_primary(c: Optional[Candidate],
     if c is primary or titles_agree(primary.title, c.title):
         return True
     # 同一部作品被不同来源拆成不同分段时（豆瓣“灵笼 第一季” vs
-    # Bangumi“灵笼 上半季”），标题不会直接相似，但它们共有一个基础标题；
-    # 这种情况下两边都是高分命中同一批搜索词，应当都保留。
-    base_primary = _base_title(primary.title)
-    base_c = _base_title(c.title)
-    if base_primary and base_c and base_primary == base_c:
-        if _both_confident(primary, c):
-            return True
+    # Bangumi“灵笼 上半季”），或一个带季号一个不带（“灵笼 第一季” vs
+    # “灵笼”），标题不会直接相似，但去掉季/分段后是同一个基础名，
+    # 应当都保留。
+    if not _is_different_work(primary.title, c.title):
+        base_primary = _base_title(primary.title)
+        base_c = _base_title(c.title)
+        if base_primary and base_c and base_primary == base_c:
+            if _both_confident(primary, c):
+                return True
     # 中英文标题不同（IMDb 英文名 vs Bangumi 中文名）时，
     # 只要这条 Bangumi 自己也是高分命中同一个搜索词，仍可采用。
     ok = bool(isinstance(c.extra, dict) and
@@ -333,11 +345,26 @@ def _is_different_work(a: str, b: str) -> bool:
     if not an or not bn or an == bn:
         return False
 
-    shorter, longer = (an, bn) if len(an) <= len(bn) else (bn, an)
-    if len(shorter) >= 4 and longer.startswith(shorter):
-        rest = longer[len(shorter):]
+    # 先看“一方是另一方的前缀”这种最常见的情况：
+    # “灵笼 上半季” vs “灵笼 第一季” 去掉季说明后基础名相同 → 同一作品；
+    # “祝福！” vs “祝福！外传” 多出实词 → 不同作品。
+    short, long_ = (an, bn) if len(an) <= len(bn) else (bn, an)
+    if len(short) >= 2 and long_.startswith(short):
+        rest = long_[len(short):]
         if rest:
             return not _is_suffix_only(rest)
+
+    # 两个都带季/分段说明（“灵笼 上半季” vs “灵笼 第一季”）：
+    # 去掉后缀后基础名一致就算同一作品。
+    from .scoring import _SEASON_SUFFIX_WORDS
+    def _strip_suffix(text: str) -> str:
+        for word in sorted(set(_SEASON_SUFFIX_WORDS), key=len, reverse=True):
+            if text.endswith(word) and len(text) > len(word):
+                return text[: -len(word)]
+        return text
+    base_a, base_b = _strip_suffix(an), _strip_suffix(bn)
+    if base_a and base_b and base_a == base_b:
+        return False
 
     # 长度接近但内容不同：同系列外传常把主标题里的两三个字换掉
     if abs(len(an) - len(bn)) <= 2 and len(an) >= 6:

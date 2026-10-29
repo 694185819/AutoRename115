@@ -333,10 +333,24 @@ def kind_ok(c: Candidate, media_type: str) -> bool:
 
 
 def pick_primary(cands: list[Candidate],
-                 media_type: str) -> Optional[Candidate]:
+                 media_type: str,
+                 want_season: Optional[int] = None) -> Optional[Candidate]:
     pool = [c for c in cands if c and kind_ok(c, media_type)]
     if not pool:
         return None
+    # 本地明确要第 N 季时，季号对得上的条目优先：
+    # “灵笼 第一季”（的季号匹配）应压过纯标题“灵笼”，
+    # 否则会退回到没有单集信息的总条目上。
+    # 但“精编版/总集篇”这类重剪版不算——它们的年份往往差很多，
+    # 会把正确条目挤掉。
+    if want_season is not None:
+        reissue = ("精编", "总集", "重制", "合集", "导演剪辑")
+        season_hits = [c for c in pool
+                       if isinstance(c.extra, dict) and
+                       c.extra.get("season_score") == 1.0 and
+                       not any(k in (c.title or "") for k in reissue)]
+        if season_hits:
+            pool = season_hits
     # 与本地标题完全一致的条目优先，避免高季号/高年份的近似条目
     # 靠模糊分抢走主条目（Jellyfin TMDB provider 也采用这一策略）。
     # “标题 + 季/分段后缀”虽然也通过锚点，但不能压过完全同名条目。
