@@ -540,15 +540,9 @@ class App(tk.Tk):
         self.meta_label = ttk.Label(detail, text="", foreground="#555")
         self.meta_label.pack(fill="x", pady=(4, 0))
         # 季集映射/视频数与 NFO 操作都属于“这个任务怎么处理”的信息，
-        # 紧跟在元信息后面，备注框放到最后，避免长备注把人挤开。
-        map_row = ttk.Frame(detail)
-        map_row.pack(fill="x", pady=(4, 0))
-        self.map_btn = ttk.Button(map_row, text="季集映射…",
-                                  command=self.open_episode_mapping,
-                                  state="disabled")
-        self.map_btn.pack(side="left")
-        self.map_label = ttk.Label(map_row, text="", foreground="#777")
-        self.map_label.pack(side="left", padx=8)
+        # 顺序：元信息 → NFO/图片操作 → 季集映射 → 备注。
+        # NFO 与季集映射都是“对这个任务做什么”，靠在一起；备注放最后，
+        # 避免长备注把其他内容挤开。
         nfo_row = ttk.Frame(detail)
         nfo_row.pack(fill="x", pady=(4, 0))
         ttk.Button(nfo_row, text="保存 NFO/图片",
@@ -564,6 +558,14 @@ class App(tk.Tk):
         self.nfo_mode_label = ttk.Label(
             nfo_row, text=self._nfo_mode_text(), foreground="#777")
         self.nfo_mode_label.pack(side="left", padx=8)
+        map_row = ttk.Frame(detail)
+        map_row.pack(fill="x", pady=(4, 0))
+        self.map_btn = ttk.Button(map_row, text="季集映射…",
+                                  command=self.open_episode_mapping,
+                                  state="disabled")
+        self.map_btn.pack(side="left")
+        self.map_label = ttk.Label(map_row, text="", foreground="#777")
+        self.map_label.pack(side="left", padx=8)
         # 备注常常很长（搜索诊断 + 疑似重复 + 冲突说明），以前直接用 Label
         # 撑开会挤压下方内容；改成固定高度、可滚动的文本框，并放在最后。
         note_box = ttk.Frame(detail)

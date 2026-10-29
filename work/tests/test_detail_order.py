@@ -29,16 +29,16 @@ def main():
     assert "分类" not in labels, "详情区不应再有“分类”标签"
     print("分类已移除")
 
-    # 备注框在季集映射/NFO 之后
+    # 纵向顺序：标题行 < 元信息 < NFO/图片 < 季集映射 < 备注
     note_y = app.note_label.winfo_rooty()
     map_y = app.map_btn.winfo_rooty()
-    print("季集映射 y:", map_y, "| 备注 y:", note_y)
-    assert map_y < note_y, "备注应排在季集映射之下"
-
-    # 详情区纵向顺序：标题行 < 元信息 < 季集映射 < 备注
     meta_y = app.meta_label.winfo_rooty()
-    assert meta_y < map_y < note_y, (meta_y, map_y, note_y)
-    print("顺序正确：标题行 → 元信息 → 季集映射/NFO → 备注")
+    nfo_y = app.nfo_mode_label.winfo_rooty()
+    print(f"元信息 y={meta_y} | NFO y={nfo_y} | 季集映射 y={map_y} | 备注 y={note_y}")
+    assert meta_y < nfo_y, "NFO 操作应紧跟元信息"
+    assert nfo_y < map_y, "季集映射应在 NFO 操作下方"
+    assert map_y < note_y, "备注应在最后"
+    print("顺序正确：元信息 → NFO/图片 → 季集映射 → 备注")
 
     app.destroy()
     print("DETAIL ORDER OK")
