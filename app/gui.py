@@ -220,6 +220,9 @@ class App(tk.Tk):
             subtitle_source=self.settings.get("subtitle_source", "auto"),
             include_specs=bool(self.settings.get("include_specs", True)))
         self.planner = Planner(self.meta, self.options, log=self.log_threadsafe)
+        # 主界面“命名规则”面板编辑的就是这份草稿；保存后才写回 settings。
+        import copy as _copy
+        self._draft_options = _copy.copy(self.options)
 
     # ------------------------------------------------------------ 界面
     @staticmethod
@@ -264,11 +267,17 @@ class App(tk.Tk):
     def _ui_window(self) -> None:
         """窗口、主题与树形控件样式。"""
         self.title(APP_TITLE)
-        # 在 1280 宽的基础上左右加宽：第一次 5cm，这次再拉长 5cm，
-        # 合计 10cm（按当前屏幕 DPI 换算）；下方再增加 1cm 高度。
-        self._center_window(self, 1280 + self._cm_to_px(10),
-                            800 + self._cm_to_px(1))
-        self.minsize(1000, 650)
+        # 宽度：在 1280 的基础上左右各加 5cm（按屏幕 DPI 换算）。
+        # 高度：右栏内容（任务表 + 选中项详情 + 命名规则面板 + 影片资料 +
+        # 运行日志）自然需要约 951px，再加上顶栏与状态栏；在屏幕允许的
+        # 范围内尽量给足高度，内容才能完整显示（以前固定 800 + 1cm，
+        # 加入命名规则面板后下方被压缩到看不见）。任务表会吃掉多余高度。
+        width = 1280 + self._cm_to_px(10)
+        screen_h = self.winfo_screenheight()
+        height = min(990 + self._cm_to_px(1), screen_h - 60)
+        self._center_window(self, width, height)
+        # 最小高度同步放宽，避免缩小窗口后下方再次被压扁
+        self.minsize(1000, min(900, self.winfo_screenheight() - 80))
         try:
             self.iconname(APP_TITLE)
         except Exception:
@@ -560,6 +569,24 @@ class App(tk.Tk):
         self.nfo_mode_label = ttk.Label(
             nfo_row, text=self._nfo_mode_text(), foreground="#777")
         self.nfo_mode_label.pack(side="left", padx=8)
+
+        # 命名规则：直接放在主界面，改完可以对当前任务立即重建预览。
+        naming = ttk.LabelFrame(right, text="命名规则（修改后点“按此规则重建”或重新分析）",
+                                padding=6)
+        naming.pack(fill="x", pady=(0, 4))
+        try:
+            from .naming_panel import NamingRulePanel
+            self.naming_panel = NamingRulePanel(
+                naming, lambda: self._draft_options,
+                lambda o: setattr(self, "_draft_options", o))
+            self.naming_panel.pack(fill="x")
+            ttk.Button(naming, text="保存为默认并重建当前任务",
+                       command=self.apply_naming_rule).pack(
+                anchor="e", pady=(6, 0))
+        except Exception as e:      # noqa: BLE001
+            self.naming_panel = None
+            ttk.Label(naming, text=f"命名规则面板加载失败：{e}",
+                      foreground="#b3261e").pack(anchor="w")
 
         # 影片资料：评分 / 封面 / 简介 / 演员；来源用单选，不用下拉框
         info = ttk.LabelFrame(right, text="影片资料", padding=6)
@@ -2102,6 +2129,30 @@ class App(tk.Tk):
         except Exception:
             pass
 
+    def apply_naming_rule(self) -> None:
+        """主界面“命名规则”面板：保存为默认设置，并重建当前任务。"""
+        if self.naming_panel is None:
+            return
+        values = self.naming_panel.values()
+        self.settings.update(values)
+        try:
+            self._save_settings()
+        except Exception as e:      # noqa: BLE001
+            self._log(f"保存命名规则失败：{e}")
+        self._init_meta()
+        p = self.detail_plan
+        if p is None:
+            self._log("命名规则已保存；选中任务后点“重新生成预览”即可生效。")
+            return
+
+        def done(ok: bool, err: str) -> None:
+            if ok:
+                self._log(f"命名规则已应用：{p.title}（{len(p.ops)} 个操作）")
+            else:
+                self._log(f"按新规则重建失败：{err}")
+
+        self.rebuild_in_background(p, done)
+
     def _refresh_info_sources(self, plan: PlanItem) -> None:
         available = {
             "douban": bool(self._info_source_details(plan, "douban")[0]),
@@ -3534,6 +3585,12 @@ class App(tk.Tk):
         self.settings.update(new_settings)
         self._save_settings()
         self._init_meta()
+        # 主界面的命名规则面板跟随最新设置刷新
+        try:
+            if self.naming_panel is not None:
+                self.naming_panel.reload()
+        except Exception:
+            pass
         self.nfo_mode_label.configure(text=self._nfo_mode_text())
         self._sync_update_schedule()
         self._log("设置已保存。")
@@ -4223,21 +4280,8 @@ class SettingsDialog(tk.Toplevel):
         self.douban_test_btn.pack(side="left", padx=6)
         self.douban_test_label = ttk.Label(frame, text="", foreground="#777")
         self.douban_test_label.pack(anchor="w")
-
-        # 命名规则面板：中文主名称 . 来源名 . SxxExx . 副标题 [规格]
-        # 这里只调整“预览用”的 NamingOptions；点“保存”时才真正生效。
-        try:
-            import copy as _copy
-
-            from .naming_panel import NamingRulePanel
-            self._draft_options = _copy.copy(app.options)
-            self.naming_panel = NamingRulePanel(
-                frame, lambda: self._draft_options, lambda o: None)
-            self.naming_panel.pack(fill="x", pady=(8, 0))
-        except Exception as e:      # noqa: BLE001
-            self.naming_panel = None
-            ttk.Label(frame, text=f"命名规则面板加载失败：{e}",
-                      foreground="#b3261e").pack(anchor="w")
+        # 命名规则已移到主界面（可折叠区块），这里不再重复放置。
+        self.naming_panel = None
         ttk.Separator(frame).pack(fill="x", pady=(10, 8))
         # 按钮区改为正常顺序靠底，不再用 side="bottom" 与内容争抢空间：
         # 以前内容自然高度超过 610px 时，按钮会被压成一条细条。

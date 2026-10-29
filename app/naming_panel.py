@@ -150,6 +150,18 @@ class NamingRulePanel(ttk.LabelFrame):
         opts.include_specs = bool(self.spec_var.get())
         self._set_options(opts)
 
+    def reload(self) -> None:
+        """按当前 NamingOptions 重新同步界面（设置被外部改动后调用）。"""
+        opts = self._get_options()
+        self.seg_var.set(NAME_SOURCE_LABELS.get(
+            getattr(opts, "name_segment_source", "imdb"),
+            NAME_SOURCE_LABELS["imdb"]))
+        self.sub_var.set(SUBTITLE_LABELS.get(
+            getattr(opts, "subtitle_source", "auto"),
+            SUBTITLE_LABELS["auto"]))
+        self.spec_var.set(bool(getattr(opts, "include_specs", True)))
+        self._refresh_preview()
+
     def values(self) -> dict:
         """给设置对话框保存用的配置字典。"""
         return {
