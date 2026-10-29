@@ -78,6 +78,158 @@ def _call(app, name: str, *args, **kwargs):
         return None
 
 
+class NamingRulePanel(QWidget):
+    """命名规则面板：中文主名称 . 来源名 . SxxExx . 副标题 [规格]。
+
+    与 Tk 版共用同一套常量与拼装函数（app.naming_rule），
+    这里只负责界面与实时预览。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        from app.naming_panel import (JP_FOLDER_OPTIONS, MOVIE_LABELS,
+                                      MOVIE_STYLES, NAME_SOURCE_LABELS,
+                                      SUBTITLE_LABELS)
+        from app.models import PlanItem          # noqa: F401  确保导入路径正确
+
+        self._src_labels = NAME_SOURCE_LABELS
+        self._sub_labels = SUBTITLE_LABELS
+        self._jp_labels = JP_FOLDER_OPTIONS
+        self._movie_labels = MOVIE_LABELS
+        self._movie_styles = MOVIE_STYLES
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(4)
+
+        # 第一行：固定项 + 来源名 + 副标题
+        row1 = QHBoxLayout()
+        row1.setSpacing(4)
+        row1.addWidget(self._fixed_label("中文主名称 ."))
+        self.combo_seg = QComboBox()
+        self.combo_seg.addItems(list(self._src_labels.values()))
+        self.combo_seg.setMinimumWidth(140)
+        row1.addWidget(self.combo_seg)
+        row1.addWidget(self._fixed_label(". S01E01 ."))
+        self.combo_sub = QComboBox()
+        self.combo_sub.addItems(list(self._sub_labels.values()))
+        self.combo_sub.setMinimumWidth(170)
+        row1.addWidget(self.combo_sub)
+        row1.addWidget(QLabel("规格"))
+        self.radio_spec_yes = QRadioButton("是")
+        self.radio_spec_no = QRadioButton("否")
+        self.radio_spec_yes.setChecked(True)
+        row1.addWidget(self.radio_spec_yes)
+        row1.addWidget(self.radio_spec_no)
+        row1.addStretch(1)
+        lay.addLayout(row1)
+
+        # 第二行：日番格式 + 电影命名
+        row2 = QHBoxLayout()
+        row2.setSpacing(4)
+        row2.addWidget(QLabel("日番"))
+        self.combo_jp = QComboBox()
+        self.combo_jp.addItems(list(self._jp_labels.values()))
+        self.combo_jp.setMinimumWidth(260)
+        row2.addWidget(self.combo_jp)
+        row2.addSpacing(10)
+        row2.addWidget(QLabel("电影"))
+        self.combo_movie = QComboBox()
+        self.combo_movie.addItems([self._movie_labels[k]
+                                   for k in self._movie_styles])
+        self.combo_movie.setMinimumWidth(180)
+        row2.addWidget(self.combo_movie)
+        row2.addStretch(1)
+        lay.addLayout(row2)
+
+        # 预览
+        self.preview = QLabel("")
+        self.preview.setWordWrap(True)
+        self.preview.setStyleSheet("color:#176b33;")
+        lay.addWidget(self.preview)
+
+        for w in (self.combo_seg, self.combo_sub, self.combo_jp,
+                  self.combo_movie):
+            w.currentIndexChanged.connect(self.refresh_preview)
+        self.radio_spec_yes.toggled.connect(self.refresh_preview)
+        self.refresh_preview()
+
+    @staticmethod
+    def _fixed_label(text: str) -> QLabel:
+        lab = QLabel(text)
+        lab.setStyleSheet(
+            "color:#8a8a8a; background:#eeeeee; padding:2px 5px;")
+        return lab
+
+    # ---------------- 取值
+    def _source_key(self) -> str:
+        label = self.combo_seg.currentText()
+        for key, val in self._src_labels.items():
+            if val == label:
+                return key
+        return "imdb"
+
+    def _subtitle_key(self) -> str:
+        label = self.combo_sub.currentText()
+        for key, val in self._sub_labels.items():
+            if val == label:
+                return key
+        return "auto"
+
+    def _jp_key(self) -> str:
+        label = self.combo_jp.currentText()
+        for key, val in self._jp_labels.items():
+            if val == label:
+                return key
+        return "bdremux"
+
+    def values(self) -> dict:
+        """与 Tk 版 values() 同名的键，便于统一写回设置。"""
+        return {
+            "name_segment_source": self._source_key(),
+            "subtitle_source": self._subtitle_key(),
+            "include_specs": bool(self.radio_spec_yes.isChecked()),
+            "jp_folder_style": self._jp_key(),
+        }
+
+    def set_values(self, opts) -> None:
+        """按 NamingOptions 回填，保持一致。"""
+        from app.naming_panel import (JP_FOLDER_OPTIONS, NAME_SOURCE_LABELS,
+                                      SUBTITLE_LABELS)
+        seg = getattr(opts, "name_segment_source", "imdb")
+        sub = getattr(opts, "subtitle_source", "auto")
+        jp = getattr(opts, "jp_folder_style", "bdremux")
+        if seg in NAME_SOURCE_LABELS:
+            self.combo_seg.setCurrentText(NAME_SOURCE_LABELS[seg])
+        if sub in SUBTITLE_LABELS:
+            self.combo_sub.setCurrentText(SUBTITLE_LABELS[sub])
+        if jp in JP_FOLDER_OPTIONS:
+            self.combo_jp.setCurrentText(JP_FOLDER_OPTIONS[jp])
+        self.radio_spec_yes.setChecked(bool(getattr(opts, "include_specs", True)))
+        self.refresh_preview()
+
+    # ---------------- 预览
+    def refresh_preview(self) -> None:
+        from app.naming_panel import EXAMPLE_SEGMENTS
+        from app.naming_rule import build_episode_filename
+
+        seg = EXAMPLE_SEGMENTS.get(self._source_key(), "")
+        sample = build_episode_filename(
+            "灵笼", 1, 1, ext=".mp4", name_segment=seg,
+            subtitle="灯塔和光影会",
+            specs="1080p WEB-DL" if self.radio_spec_yes.isChecked() else "")
+        if self._jp_key() == "bdremux":
+            jp = ("[BD-REMUX]86 -不存在的战区 86―エイティシックス― "
+                  "(2021) [imdbid-tt13718450]")
+        else:
+            jp = "86 -不存在的战区 (2021) [imdbid-tt13718450]"
+        movie = "朝花夕拾 (2018) [imdbid-tt9691596]"
+        self.preview.setText(
+            "灰色为固定项（中文主名称取自任务标题，SxxExx 按文件推断）\n"
+            f"剧集：{sample}\n日番文件夹：{jp}\n"
+            f"电影：{movie}（目前只有这一种写法）")
+
+
 class MainWindow(QMainWindow):
     """主窗口：左侧目录 + 右侧任务表（第一阶段只实现右侧）。"""
 
@@ -349,15 +501,67 @@ class MainWindow(QMainWindow):
 
         self.note = QTextEdit()
         self.note.setReadOnly(True)
-        self.note.setMaximumHeight(96)
+        self.note.setMaximumHeight(90)
         lay.addWidget(self.note)
+
+        # 季集映射
+        map_row = QHBoxLayout()
+        map_row.setSpacing(6)
+        self.btn_map = QPushButton("季集映射…")
+        map_row.addWidget(self.btn_map)
+        self.lbl_map = QLabel("")
+        self.lbl_map.setStyleSheet("color:#777;")
+        map_row.addWidget(self.lbl_map, 1)
+        lay.addLayout(map_row)
+
+        # 命名规则面板
+        lay.addWidget(QLabel("命名规则"))
+        self.naming_panel = NamingRulePanel()
+        lay.addWidget(self.naming_panel)
+        btn_save_rule = QPushButton("保存为默认")
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
+        btn_row.addWidget(btn_save_rule)
+        lay.addLayout(btn_row)
+        btn_save_rule.clicked.connect(self.save_naming_rule)
+
+        # NFO / 图片
+        nfo_row = QHBoxLayout()
+        nfo_row.setSpacing(6)
+        self.btn_nfo_save = QPushButton("保存 NFO/图片")
+        self.btn_nfo_clear = QPushButton("清空 NFO/图片…")
+        self.chk_auto_nfo = QCheckBox("应用改名后自动存")
+        nfo_row.addWidget(self.btn_nfo_save)
+        nfo_row.addWidget(self.btn_nfo_clear)
+        nfo_row.addWidget(self.chk_auto_nfo)
+        nfo_row.addStretch(1)
+        lay.addLayout(nfo_row)
 
         self.log = QTextEdit()
         self.log.setReadOnly(True)
-        self.log.setMaximumHeight(120)
+        self.log.setMaximumHeight(110)
         lay.addWidget(self.log)
         lay.addStretch(1)
         return box
+
+    def save_naming_rule(self) -> None:
+        """把命名规则写回设置（对应 Tk 版 apply_naming_rule）。"""
+        values = self.naming_panel.values()
+        app = self.app
+        try:
+            settings = getattr(app, "settings", {})
+            settings.update(values)
+            fn = getattr(app, "_save_settings", None)
+            if callable(fn):
+                fn()
+            opts = getattr(app, "options", None)
+            if opts is not None:
+                for k, v in values.items():
+                    setattr(opts, k, v)
+            self.append_log("命名规则已保存：" + ", ".join(
+                f"{k}={v}" for k, v in values.items()))
+        except Exception as e:      # noqa: BLE001
+            self.append_log(f"保存命名规则失败：{e}")
 
     def _build_statusbar(self) -> QWidget:
         bar = QWidget()
