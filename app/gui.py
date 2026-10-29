@@ -2045,8 +2045,7 @@ class App(tk.Tk):
         sel = self.plan_tree.selection()
         if not sel:
             self.detail_plan = None
-            for var in (self.title_var, self.year_var,
-                        self.season_var, self.category_var):
+            for var in (self.title_var, self.year_var, self.season_var):
                 var.set("")
             self._set_note("")
             self.meta_label.configure(text="")

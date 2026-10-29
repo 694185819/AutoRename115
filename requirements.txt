@@ -1,3 +1,7 @@
 requests>=2.31
 rapidfuzz>=3.6
 Pillow>=10.3
+
+# 可选：Qt 界面（--ui=qt）。不装则只能用默认界面。
+# 只装 Essentials，避免带进用不到的 WebEngine。
+PySide6-Essentials>=6.6 ; extra == "qt"
