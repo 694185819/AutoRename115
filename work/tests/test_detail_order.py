@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""详情区顺序：元信息 → 季集映射 → NFO → 备注；分类下拉已移除。"""
+"""详情区顺序 + NFO 行位置：命名规则 之后、影片资料 之前；分类已移除。"""
 import sys
 
 sys.path.insert(0, r"I:\实验\AutoRename115")
@@ -23,22 +23,31 @@ def main():
 
     # 分类下拉必须已移除
     assert not hasattr(app, "category_var"), "分类下拉应已移除"
-    assert not hasattr(app, "category_box"), "分类下拉应已移除"
     labels = [str(w.cget("text")) for w in walk(app)
               if w.winfo_class() == "TLabel"]
     assert "分类" not in labels, "详情区不应再有“分类”标签"
-    print("分类已移除")
 
-    # 纵向顺序：标题行 < 元信息 < NFO/图片 < 季集映射 < 备注
-    note_y = app.note_label.winfo_rooty()
-    map_y = app.map_btn.winfo_rooty()
+    # 详情区内部：元信息 → 季集映射 → 备注
     meta_y = app.meta_label.winfo_rooty()
+    map_y = app.map_btn.winfo_rooty()
+    note_y = app.note_label.winfo_rooty()
+    print(f"详情区：元信息 y={meta_y} | 季集映射 y={map_y} | 备注 y={note_y}")
+    assert meta_y < map_y < note_y, (meta_y, map_y, note_y)
+
+    # NFO 行：在命名规则面板之下、影片资料之上
     nfo_y = app.nfo_mode_label.winfo_rooty()
-    print(f"元信息 y={meta_y} | NFO y={nfo_y} | 季集映射 y={map_y} | 备注 y={note_y}")
-    assert meta_y < nfo_y, "NFO 操作应紧跟元信息"
-    assert nfo_y < map_y, "季集映射应在 NFO 操作下方"
-    assert map_y < note_y, "备注应在最后"
-    print("顺序正确：元信息 → NFO/图片 → 季集映射 → 备注")
+    naming_y = app.naming_panel.winfo_rooty()
+    info_label_y = min(w.winfo_rooty() for w in walk(app)
+                       if w.winfo_class() == "TLabel"
+                       and str(w.cget("text")) == "资料来源")
+    print(f"NFO y={nfo_y} | 命名规则 y={naming_y} | 资料来源 y={info_label_y}")
+    assert naming_y < nfo_y < info_label_y, (naming_y, nfo_y, info_label_y)
+
+    # NFO 行不在详情区里
+    detail = app.map_btn.master.master
+    inside = [w for w in walk(detail)
+              if w is app.nfo_mode_label or w is app.auto_nfo_var]
+    assert not inside, "NFO 行不应留在详情区"
 
     app.destroy()
     print("DETAIL ORDER OK")

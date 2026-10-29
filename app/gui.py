@@ -539,25 +539,8 @@ class App(tk.Tk):
                    command=self.preview_ops).pack(side="left", padx=4)
         self.meta_label = ttk.Label(detail, text="", foreground="#555")
         self.meta_label.pack(fill="x", pady=(4, 0))
-        # 季集映射/视频数与 NFO 操作都属于“这个任务怎么处理”的信息，
-        # 顺序：元信息 → NFO/图片操作 → 季集映射 → 备注。
-        # NFO 与季集映射都是“对这个任务做什么”，靠在一起；备注放最后，
-        # 避免长备注把其他内容挤开。
-        nfo_row = ttk.Frame(detail)
-        nfo_row.pack(fill="x", pady=(4, 0))
-        ttk.Button(nfo_row, text="保存 NFO/图片",
-                   command=self.save_nfo_artwork).pack(side="left")
-        ttk.Button(nfo_row, text="清空 NFO/图片…",
-                   command=self.clear_nfo_artwork).pack(side="left", padx=6)
-        self.auto_nfo_var = tk.BooleanVar(
-            value=bool(self.settings.get("auto_nfo_after_rename", False)))
-        ttk.Checkbutton(
-            nfo_row, text="应用改名后自动存 NFO/图片",
-            variable=self.auto_nfo_var,
-            command=self._on_auto_nfo_toggle).pack(side="left", padx=(4, 0))
-        self.nfo_mode_label = ttk.Label(
-            nfo_row, text=self._nfo_mode_text(), foreground="#777")
-        self.nfo_mode_label.pack(side="left", padx=8)
+        # 顺序：元信息 → 季集映射 → 备注。
+        # NFO/图片操作已移出详情区，放到“命名规则”与“影片资料”之间。
         map_row = ttk.Frame(detail)
         map_row.pack(fill="x", pady=(4, 0))
         self.map_btn = ttk.Button(map_row, text="季集映射…",
@@ -601,6 +584,23 @@ class App(tk.Tk):
             self.naming_panel = None
             ttk.Label(naming, text=f"命名规则面板加载失败：{e}",
                       foreground="#b3261e").pack(anchor="w")
+
+        # NFO/图片操作：放在“命名规则”与“影片资料”之间。
+        nfo_row = ttk.Frame(right)
+        nfo_row.pack(fill="x", pady=(0, 4))
+        ttk.Button(nfo_row, text="保存 NFO/图片",
+                   command=self.save_nfo_artwork).pack(side="left")
+        ttk.Button(nfo_row, text="清空 NFO/图片…",
+                   command=self.clear_nfo_artwork).pack(side="left", padx=6)
+        self.auto_nfo_var = tk.BooleanVar(
+            value=bool(self.settings.get("auto_nfo_after_rename", False)))
+        ttk.Checkbutton(
+            nfo_row, text="应用改名后自动存 NFO/图片",
+            variable=self.auto_nfo_var,
+            command=self._on_auto_nfo_toggle).pack(side="left", padx=(4, 0))
+        self.nfo_mode_label = ttk.Label(
+            nfo_row, text=self._nfo_mode_text(), foreground="#777")
+        self.nfo_mode_label.pack(side="left", padx=8)
 
         # 影片资料：评分 / 封面 / 简介 / 演员；来源用单选，不用下拉框
         info = ttk.LabelFrame(right, text="影片资料", padding=6)
