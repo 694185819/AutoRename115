@@ -13,12 +13,14 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QAction, QColor, QFont
+from PySide6.QtCore import Qt, QTimer, QUrl
+from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox,
-                               QComboBox, QHBoxLayout, QHeaderView, QLabel,
-                               QLineEdit, QMainWindow, QMenu, QPushButton,
+                               QComboBox, QDialog, QFormLayout, QGroupBox,
+                               QHBoxLayout, QHeaderView, QLabel, QLineEdit,
+                               QMainWindow, QMenu, QMessageBox, QPushButton,
                                QRadioButton, QSplitter, QTableWidget,
                                QTableWidgetItem, QTextEdit, QTreeWidget,
                                QTreeWidgetItem, QVBoxLayout, QWidget)
@@ -230,6 +232,393 @@ class NamingRulePanel(QWidget):
             f"电影：{movie}（目前只有这一种写法）")
 
 
+class SettingsDialog(QDialog):
+    """设置：命名相关、ID 与更新、豆瓣连接、TMDB Key。
+
+    与 Tk 版共用 settings.json 的键名，两边可互通。
+    """
+
+    def __init__(self, parent, app):
+        super().__init__(parent)
+        self.app = app
+        self.setWindowTitle("设置")
+        self.setMinimumWidth(680)
+        s = getattr(app, "settings", {}) or {}
+
+        lay = QVBoxLayout(self)
+        lay.setSpacing(8)
+
+        # ---- 命名与格式
+        box1 = QGroupBox("命名与格式")
+        f1 = QFormLayout(box1)
+        self.combo_id_style = QComboBox()
+        self.combo_id_style.addItems(["jellyfin", "emby", "plex", "none"])
+        self.combo_id_style.setCurrentText(
+            str(s.get("imdb_id_style", "jellyfin")))
+        f1.addRow("ID 写法", self.combo_id_style)
+
+        self.combo_provider = QComboBox()
+        self.combo_provider.addItems(["auto", "imdb", "tmdb"])
+        self.combo_provider.setCurrentText(str(s.get("id_provider", "auto")))
+        f1.addRow("ID 来源", self.combo_provider)
+
+        self.chk_subtitles = QCheckBox("同步重命名同名字幕/音轨")
+        self.chk_subtitles.setChecked(bool(s.get("rename_subtitles", True)))
+        f1.addRow("", self.chk_subtitles)
+        self.chk_season_dir = QCheckBox("把季目录改名为 Season 01")
+        self.chk_season_dir.setChecked(bool(s.get("rename_season_folders", True)))
+        f1.addRow("", self.chk_season_dir)
+        self.chk_bangumi = QCheckBox("使用 Bangumi 作为中文来源")
+        self.chk_bangumi.setChecked(bool(s.get("use_bangumi", True)))
+        f1.addRow("", self.chk_bangumi)
+        lay.addWidget(box1)
+
+        # ---- 豆瓣
+        box2 = QGroupBox("豆瓣（单集名走本机浏览器读取）")
+        f2 = QVBoxLayout(box2)
+        note = QLabel("豆瓣会拦截普通 HTTP 请求，程序会用本机 Chrome/Edge "
+                      "读取分集页。Cookie 仅作补充，可不填。")
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#777;")
+        f2.addWidget(note)
+        row = QHBoxLayout()
+        self.edit_cookie = QLineEdit(str(s.get("douban_cookie", "") or ""))
+        self.edit_cookie.setEchoMode(QLineEdit.Password)
+        row.addWidget(self.edit_cookie, 1)
+        btn_paste = QPushButton("从剪贴板粘贴")
+        btn_open = QPushButton("打开豆瓣…")
+        btn_test = QPushButton("测试连接")
+        row.addWidget(btn_paste)
+        row.addWidget(btn_open)
+        row.addWidget(btn_test)
+        f2.addLayout(row)
+        self.lbl_douban = QLabel("")
+        self.lbl_douban.setWordWrap(True)
+        f2.addWidget(self.lbl_douban)
+        btn_paste.clicked.connect(self._paste_cookie)
+        btn_open.clicked.connect(
+            lambda: QDesktopServices.openUrl(
+                QUrl("https://movie.douban.com/")))
+        btn_test.clicked.connect(self._test_douban)
+        lay.addWidget(box2)
+
+        # ---- TMDB
+        box3 = QGroupBox("TMDB（可选）")
+        f3 = QHBoxLayout(box3)
+        self.edit_tmdb = QLineEdit(str(s.get("tmdb_key", "") or ""))
+        f3.addWidget(self.edit_tmdb, 1)
+        btn_tmdb = QPushButton("获取 API Key…")
+        btn_tmdb.clicked.connect(
+            lambda: QDesktopServices.openUrl(
+                QUrl("https://www.themoviedb.org/settings/api")))
+        f3.addWidget(btn_tmdb)
+        lay.addWidget(box3)
+
+        # ---- 其它
+        box4 = QGroupBox("其它")
+        f4 = QVBoxLayout(box4)
+        self.chk_auto_update = QCheckBox("自动检查更新")
+        self.chk_auto_update.setChecked(bool(s.get("auto_check_updates", True)))
+        f4.addWidget(self.chk_auto_update)
+        self.chk_remember = QCheckBox("记住任务列表（下次启动恢复）")
+        self.chk_remember.setChecked(bool(s.get("remember_plans", True)))
+        f4.addWidget(self.chk_remember)
+        lay.addWidget(box4)
+
+        lay.addStretch(1)
+        btns = QHBoxLayout()
+        btns.addStretch(1)
+        btn_ok = QPushButton("保存")
+        btn_cancel = QPushButton("取消")
+        btns.addWidget(btn_ok)
+        btns.addWidget(btn_cancel)
+        lay.addLayout(btns)
+        btn_ok.clicked.connect(self.save)
+        btn_cancel.clicked.connect(self.reject)
+
+    # ---------------- 动作
+    def _paste_cookie(self) -> None:
+        text = (QApplication.clipboard().text() or "").strip()
+        if not text:
+            QMessageBox.information(self, "豆瓣 Cookie",
+                                    "剪贴板是空的。")
+            return
+        if not any(k in text for k in ("bid=", "dbcl2=", "ll=")):
+            ret = QMessageBox.question(
+                self, "豆瓣 Cookie",
+                "剪贴板内容看起来不像豆瓣 Cookie（没有 bid/dbcl2/ll）。\n"
+                "仍然填入吗？")
+            if ret != QMessageBox.Yes:
+                return
+        self.edit_cookie.setText(text.replace("\n", " "))
+        self.lbl_douban.setText(f"已填入 {len(text)} 字符，保存后生效。")
+
+    def _test_douban(self) -> None:
+        """用当前 Cookie 实测一次豆瓣分集页。"""
+        cookie = self.edit_cookie.text().strip()
+        if not cookie:
+            self.lbl_douban.setText(
+                "没有填 Cookie：程序仍会尝试用本机浏览器读取豆瓣。")
+        self.lbl_douban.setText("测试中…")
+        btn = self.sender()
+
+        def worker():
+            from app.metadata import MetadataClient
+            m = MetadataClient("", use_bangumi=False)
+            m.douban_cookie = cookie
+            m.delays["douban"] = 0.0
+            try:
+                page = m._douban_episode_page("27121260", 1, 1)
+            except Exception as e:      # noqa: BLE001
+                page = {"ok": False, "reason": str(e)}
+            QTimer.singleShot(0, lambda: self._show_test(page))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _show_test(self, page: dict) -> None:
+        if page.get("ok"):
+            self.lbl_douban.setText(
+                f"豆瓣可读：第1集 = {page.get('title') or '（无集名）'}")
+            self.lbl_douban.setStyleSheet("color:#176b33;")
+        else:
+            self.lbl_douban.setText(
+                f"豆瓣不可读：{page.get('reason') or '未知原因'}")
+            self.lbl_douban.setStyleSheet("color:#b3261e;")
+
+    def save(self) -> None:
+        values = {
+            "imdb_id_style": self.combo_id_style.currentText(),
+            "id_provider": self.combo_provider.currentText(),
+            "rename_subtitles": self.chk_subtitles.isChecked(),
+            "rename_season_folders": self.chk_season_dir.isChecked(),
+            "use_bangumi": self.chk_bangumi.isChecked(),
+            "douban_cookie": self.edit_cookie.text().strip(),
+            "tmdb_key": self.edit_tmdb.text().strip(),
+            "auto_check_updates": self.chk_auto_update.isChecked(),
+            "remember_plans": self.chk_remember.isChecked(),
+        }
+        app = self.app
+        try:
+            app.settings.update(values)
+            fn = getattr(app, "_save_settings", None)
+            if callable(fn):
+                fn()
+            init = getattr(app, "_init_meta", None)
+            if callable(init):
+                init()
+        except Exception as e:      # noqa: BLE001
+            QMessageBox.warning(self, "设置", f"保存失败：{e}")
+            return
+        self.accept()
+
+
+class ManualSearchDialog(QDialog):
+    """手动搜索：按关键词在豆瓣/Bangumi/IMDb/TMDB 里找正确条目并应用。"""
+
+    def __init__(self, parent, app, plan):
+        super().__init__(parent)
+        self.app = app
+        self.plan = plan
+        self.setWindowTitle("手动搜索正确条目")
+        self.resize(820, 520)
+        self._candidates: list = []
+
+        lay = QVBoxLayout(self)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("关键词"))
+        self.edit_query = QLineEdit(self._initial_keywords())
+        row.addWidget(self.edit_query, 1)
+        self.btn_search = QPushButton("搜索")
+        row.addWidget(self.btn_search)
+        lay.addLayout(row)
+
+        self.table = QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(
+            ("来源", "标题", "原名", "年份", "ID"))
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.Stretch)
+        lay.addWidget(self.table, 1)
+
+        self.lbl_hint = QLabel("双击结果或点“应用所选”即可套用到当前任务。")
+        self.lbl_hint.setStyleSheet("color:#777;")
+        lay.addWidget(self.lbl_hint)
+
+        btns = QHBoxLayout()
+        btns.addStretch(1)
+        self.btn_apply = QPushButton("应用所选")
+        self.btn_apply.setEnabled(False)
+        btn_cancel = QPushButton("取消")
+        btns.addWidget(self.btn_apply)
+        btns.addWidget(btn_cancel)
+        lay.addLayout(btns)
+
+        self.btn_search.clicked.connect(self.start_search)
+        self.btn_apply.clicked.connect(self.apply_selected)
+        self.table.itemSelectionChanged.connect(
+            lambda: self.btn_apply.setEnabled(
+                self.table.currentRow() >= 0))
+        self.table.itemDoubleClicked.connect(
+            lambda *_: self.apply_selected())
+
+    def _initial_keywords(self) -> str:
+        p = self.plan
+        title = (getattr(p, "title", "") or "").strip()
+        year = getattr(p, "year", None)
+        return f"{title} {year}" if year else title
+
+    # ---------------- 搜索
+    def start_search(self) -> None:
+        query = self.edit_query.text().strip()
+        if not query:
+            return
+        self.btn_search.setEnabled(False)
+        self.lbl_hint.setText("搜索中…")
+        app = self.app
+        media = getattr(self.plan, "media_type", "series")
+
+        def worker():
+            out = []
+            meta = getattr(app, "meta", None)
+            if meta is None:
+                QTimer.singleShot(0, lambda: self._show([], "未连接资料来源"))
+                return
+            for name, fn_name in (("豆瓣", "search_douban"),
+                                  ("Bangumi", "search_bangumi"),
+                                  ("IMDb", "search_imdb"),
+                                  ("TMDB", "search_tmdb")):
+                fn = getattr(meta, fn_name, None)
+                if not callable(fn):
+                    continue
+                try:
+                    for c in (fn(query) or [])[:15]:
+                        out.append(c)
+                except Exception as e:      # noqa: BLE001
+                    log = getattr(app, "log_threadsafe", None)
+                    if log:
+                        log(f"{name} 搜索失败：{e}")
+            QTimer.singleShot(0, lambda: self._show(out, ""))
+
+        import threading
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _show(self, cands: list, err: str) -> None:
+        self._candidates = cands
+        self.btn_search.setEnabled(True)
+        self.table.setRowCount(len(cands))
+        for i, c in enumerate(cands):
+            vals = (getattr(c, "source", ""),
+                    getattr(c, "title", ""),
+                    getattr(c, "original_title", ""),
+                    str(getattr(c, "year", "") or ""),
+                    str(getattr(c, "sid", "") or ""))
+            for col, v in enumerate(vals):
+                self.table.setItem(i, col, QTableWidgetItem(str(v)))
+        if cands:
+            self.lbl_hint.setText(f"共 {len(cands)} 条结果，双击或点“应用所选”。")
+        else:
+            self.lbl_hint.setText(err or "没有找到结果，换个关键词试试。")
+
+    # ---------------- 应用
+    def apply_selected(self) -> None:
+        row = self.table.currentRow()
+        if row < 0 or row >= len(self._candidates):
+            return
+        cand = self._candidates[row]
+        fn = getattr(self.app, "_apply_manual_candidate", None)
+        if not callable(fn):
+            self.lbl_hint.setText("当前版本不支持手动应用，请用默认界面。")
+            return
+        ids = {"imdb_id": "", "tmdb_id": "",
+               "country": getattr(cand, "country", "") or ""}
+        try:
+            fn(self.plan, cand, ids)
+            self.lbl_hint.setText(f"已应用：{getattr(cand, 'title', '')}")
+            self.accept()
+        except Exception as e:      # noqa: BLE001
+            self.lbl_hint.setText(f"应用失败：{e}")
+
+
+class EpisodeMappingDialog(QDialog):
+    """季集映射：查看/调整每个视频文件对应的季与集。"""
+
+    def __init__(self, parent, app, plan):
+        super().__init__(parent)
+        self.app = app
+        self.plan = plan
+        self.setWindowTitle("季集映射")
+        self.resize(720, 480)
+
+        lay = QVBoxLayout(self)
+        hint = QLabel("修改后点“应用”只重建预览，不会直接改网盘。")
+        hint.setStyleSheet("color:#777;")
+        lay.addWidget(hint)
+
+        videos = [e for e in ((getattr(plan, "context", {}) or {})
+                              .get("entries") or []) if getattr(e, "is_video",
+                                                                False)]
+        self.table = QTableWidget(len(videos), 4)
+        self.table.setHorizontalHeaderLabels(("文件", "季", "集", "结束集"))
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.Stretch)
+        self._rows = []
+        for i, e in enumerate(videos):
+            item = getattr(e, "item", None)
+            name = getattr(item, "name", "") if item else ""
+            parsed = getattr(e, "parsed", None)
+            season = getattr(parsed, "season", None) if parsed else None
+            ep = getattr(parsed, "episode", None) if parsed else None
+            self.table.setItem(i, 0, QTableWidgetItem(str(name)))
+            self.table.item(i, 0).setFlags(Qt.ItemIsEnabled)
+            self.table.setItem(i, 1, QTableWidgetItem(
+                "" if season is None else str(season)))
+            self.table.setItem(i, 2, QTableWidgetItem(
+                "" if ep is None else str(ep)))
+            self.table.setItem(i, 3, QTableWidgetItem(""))
+            self._rows.append((e, item))
+        lay.addWidget(self.table, 1)
+
+        btns = QHBoxLayout()
+        btns.addStretch(1)
+        self.btn_apply = QPushButton("应用")
+        btn_cancel = QPushButton("取消")
+        btns.addWidget(self.btn_apply)
+        btns.addWidget(btn_cancel)
+        lay.addLayout(btns)
+        self.btn_apply.clicked.connect(self.apply)
+        btn_cancel.clicked.connect(self.reject)
+
+    def apply(self) -> None:
+        """把表格里的季/集写回任务的 episode_overrides，再重建预览。"""
+        plan = self.plan
+        overrides = dict(getattr(plan, "episode_overrides", {}) or {})
+        for i, (entry, item) in enumerate(self._rows):
+            fid = getattr(item, "fid", "") if item else ""
+            if not fid:
+                continue
+            try:
+                season = int(self.table.item(i, 1).text())
+                ep = int(self.table.item(i, 2).text())
+            except Exception:
+                continue
+            overrides[fid] = (season, ep)
+        plan.episode_overrides = overrides
+        fn = getattr(self.app, "_apply_episode_mapping", None)
+        if callable(fn):
+            try:
+                fn(plan)
+            except Exception as e:      # noqa: BLE001
+                QMessageBox.warning(self, "季集映射", f"应用失败：{e}")
+                return
+        self.accept()
+
+
 class MainWindow(QMainWindow):
     """主窗口：左侧目录 + 右侧任务表（第一阶段只实现右侧）。"""
 
@@ -281,9 +670,26 @@ class MainWindow(QMainWindow):
                   self.btn_apply, self.btn_undo):
             lay.addWidget(b)
         lay.addStretch(1)
+        self.btn_manual = QPushButton("手动搜索…")
+        self.btn_settings = QPushButton("设置…")
+        lay.addWidget(self.btn_manual)
+        lay.addWidget(self.btn_settings)
+        self.btn_settings.clicked.connect(self.open_settings)
+        self.btn_manual.clicked.connect(self.open_manual_search)
         self.lbl_mode = QLabel("模式：未连接")
         lay.addWidget(self.lbl_mode)
         return bar
+
+    def open_settings(self) -> None:
+        SettingsDialog(self, self.app).exec()
+
+    def open_manual_search(self) -> None:
+        """手动搜索：先选任务，再按关键词搜各来源。"""
+        p = getattr(self.app, "detail_plan", None)
+        if p is None:
+            QMessageBox.information(self, "手动搜索", "请先选择一个任务。")
+            return
+        ManualSearchDialog(self, self.app, p).exec()
 
     def _build_dir_panel(self) -> QWidget:
         """左栏：文件来源、导航、目录树、右键菜单。"""
