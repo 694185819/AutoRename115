@@ -41,6 +41,8 @@ CATEGORY_LABELS = {
 
 SPEC_CATEGORIES = {"tv", "cn_anime", "us_anime", "west_anime"}
 DOTTED_CATEGORIES = {"tv", "cn_anime", "us_anime", "west_anime"}
+# 可以作为“命名来源”的数据源；命名来源决定标题、单集副标题与特别篇顺序。
+EPISODE_NAME_SOURCES = {"douban", "bangumi", "imdb", "tmdb"}
 # 额外版本目录：V2/V3 放在 ID 或目录末尾之前，例如
 # “中文名 英文名 (2020) V2 [tmdbid-123]”
 RE_FOLDER_VERSION = re.compile(
@@ -2190,6 +2192,18 @@ class Planner:
                     year=local["year"], sid=local["tmdb"], kind="tv",
                     extra={"aliases": [a for a in (local["en"], local["jp"])
                                        if a]})
+            # 本地组结果也要登记来源条目号，供“按来源命名”使用。
+            refs: dict[str, dict] = {}
+            if local["imdb"]:
+                refs["imdb"] = {"id": local["imdb"],
+                                "title": local["en"] or local["jp"],
+                                "original_title": local["en"] or local["jp"],
+                                "year": local["year"]}
+            if local["tmdb"]:
+                refs["tmdb"] = {"id": local["tmdb"], "title": local["zh"],
+                                "original_title": local["en"] or local["jp"],
+                                "year": local["year"]}
+            match.source_refs = refs
             id_match = match
         else:
             id_match = self._match_by_ids(parsed, "series", ex_imdb, ex_tmdb)
@@ -2327,6 +2341,8 @@ class Planner:
         mr: MediaRoot = plan.context.get("mr")
         if not mr:
             return plan
+        # 选了“命名来源”时，标题/年份以该来源条目为准（多次重建也幂等）。
+        self._apply_naming_source(plan)
         videos = [e for e in plan.context.get("entries", []) if e.is_video]
         sidecars = [e for e in mr.sidecars]
         title = sanitize_name(plan.identity.title or plan.parsed.title, 220)
@@ -2742,6 +2758,77 @@ class Planner:
         base = sanitize_name(base, 240 - reserved)
         return sanitize_name(base + version_part + suffix, 255)
 
+    def naming_ref(self, plan: PlanItem) -> tuple[str, str]:
+        """命名来源及其条目号：("douban"/"bangumi"/"imdb"/"tmdb", sid)。
+
+        返回 ("", "") 表示按自动匹配结果命名（维持原有行为）。
+        """
+        source = str(getattr(plan, "name_source", "") or "")
+        if source in EPISODE_NAME_SOURCES:
+            ref = plan.match.ref(source)
+            sid = str(ref.get("id") or "") if ref else ""
+            if not sid:
+                sid = self._fallback_source_id(plan, source)
+            if sid:
+                return source, sid
+        return "", ""
+
+    @staticmethod
+    def _fallback_source_id(plan: PlanItem, source: str) -> str:
+        m = plan.match
+        ident = plan.identity
+        if source == "douban":
+            return str((m.douban.sid if m.douban else "") or m.douban_id or "")
+        if source == "bangumi":
+            return str((m.bangumi.sid if m.bangumi else "") or m.bangumi_id or "")
+        if source == "imdb":
+            return str((m.imdb.sid if m.imdb else "") or ident.imdb_id or "")
+        if source == "tmdb":
+            return str((m.tmdb.sid if m.tmdb else "") or ident.tmdb_id or "")
+        return ""
+
+    def _source_episode_titles(self, plan: PlanItem, season: int,
+                               source: str, sid: str) -> dict[int, str]:
+        """按命名来源取单集标题；来源没有分集数据时返回空（不混用别的来源）。"""
+        if not source or not sid:
+            return {}
+        fn = getattr(self.metadata, "source_episode_titles", None)
+        if not callable(fn):
+            # 兼容旧测试桩：只有 TMDB 接口时，仅 TMDB 来源可用
+            if source == "tmdb":
+                fn = getattr(self.metadata, "season_episode_titles", None)
+            if not callable(fn):
+                return {}
+        try:
+            data = fn(source, sid, int(season)) or {}
+        except Exception as exc:
+            self.log(f"{source} 单集标题获取失败（{sid} S{season}）：{exc}")
+            return {}
+        return {int(k): str(v) for k, v in data.items()
+                if str(v or "").strip()}
+
+    def _apply_naming_source(self, plan: PlanItem) -> None:
+        """把命名来源的标题/年份换成该来源自己的，并记录备注。
+
+        只换“命名依据”；分类（日番/电视剧/美漫…）仍由自动判断或人工选择
+        决定，避免换个来源就改变命名格式。
+        """
+        source, sid = self.naming_ref(plan)
+        if not source:
+            return
+        ref = plan.match.ref(source)
+        title = str(ref.get("title") or "").strip()
+        if title:
+            plan.title = sanitize_name(strip_season_markers(title), 220)
+        year = ref.get("year")
+        if isinstance(year, int) and year > 0:
+            plan.year = year
+        label = {"douban": "豆瓣", "bangumi": "Bangumi",
+                 "imdb": "IMDb", "tmdb": "TMDB"}.get(source, source)
+        self._append_note(
+            plan, f"命名来源：{label}（条目 {sid}）；"
+                  "标题、单集副标题与特别篇顺序按该来源。")
+
     @staticmethod
     def _special_texts(plan: PlanItem, entry: FileEntry) -> list[str]:
         """用于匹配 TMDB 特别篇标题的本地标题/别名。"""
@@ -2823,16 +2910,23 @@ class Planner:
             if int(season) == 0 and int(ep) > 0:
                 explicit.add(int(ep))
         titles: dict[int, str] = {}
-        tmdb_id = plan.identity.tmdb_id
-        fetch = getattr(self.metadata, "season_episode_titles", None)
-        if tmdb_id and callable(fetch):
-            try:
-                raw = fetch(tmdb_id, 0) or {}
-                titles = {int(ep): str(name).strip()
-                          for ep, name in raw.items()
-                          if str(name).strip() and int(ep) > 0}
-            except Exception as exc:
-                self.log(f"TMDB 特别篇标题获取失败：{exc}")
+        name_source, name_sid = self.naming_ref(plan)
+        if name_source:
+            # 按所选来源取特别篇列表；该来源没有特别篇数据时留空，
+            # 不借用 TMDB 的第 0 季顺序（两边对特别篇的认定常不一致）。
+            titles = self._source_episode_titles(
+                plan, 0, name_source, name_sid)
+        else:
+            tmdb_id = plan.identity.tmdb_id
+            fetch = getattr(self.metadata, "season_episode_titles", None)
+            if tmdb_id and callable(fetch):
+                try:
+                    raw = fetch(tmdb_id, 0) or {}
+                    titles = {int(ep): str(name).strip()
+                              for ep, name in raw.items()
+                              if str(name).strip() and int(ep) > 0}
+                except Exception as exc:
+                    self.log(f"TMDB 特别篇标题获取失败：{exc}")
 
         def apply(e: FileEntry, ep: int) -> None:
             e.folder_season = 0
@@ -3035,27 +3129,36 @@ class Planner:
         # 电视剧/国产动画/美漫/欧美动画：中文名.英文名.SxxExx.副标题 [规格]
         english_title = ""
         online_subs: dict[tuple[int, int], str] = {}
+        name_source, name_sid = self.naming_ref(plan)
         if category in DOTTED_CATEGORIES or category == "jp_anime":
             english_title = self._english_title(plan)
-            tmdb_id = plan.identity.tmdb_id
-            fetch_titles = getattr(self.metadata, "season_episode_titles", None)
-            if tmdb_id and fetch_titles:
-                seasons = sorted({s for _, s, ep, _, _ in resolved
-                                  if s is not None and ep is not None})
-                for s in seasons:
-                    missing = any(
-                        not self._episode_subtitle(e)
-                        for e, ss, ep, _, _ in resolved
-                        if ss == s and ep is not None)
-                    if not missing:
-                        continue
-                    try:
-                        data = fetch_titles(tmdb_id, s) or {}
-                    except Exception as exc:
-                        self.log(f"单集副标题获取失败：{exc}")
-                        continue
-                    for ep_num, ep_title in data.items():
-                        online_subs[(s, ep_num)] = ep_title
+            seasons = sorted({s for _, s, ep, _, _ in resolved
+                              if s is not None and ep is not None})
+            for s in seasons:
+                missing = any(
+                    not self._episode_subtitle(e)
+                    for e, ss, ep, _, _ in resolved
+                    if ss == s and ep is not None)
+                if not missing:
+                    continue
+                if name_source:
+                    # 按所选来源取单集标题；该来源没有分集数据时留空，
+                    # 绝不悄悄混入其他来源（尤其是 TMDB）的标题。
+                    data = self._source_episode_titles(
+                        plan, s, name_source, name_sid)
+                else:
+                    tmdb_id = plan.identity.tmdb_id
+                    fetch_titles = getattr(self.metadata,
+                                           "season_episode_titles", None)
+                    data = {}
+                    if tmdb_id and fetch_titles:
+                        try:
+                            data = fetch_titles(tmdb_id, s) or {}
+                        except Exception as exc:
+                            self.log(f"单集副标题获取失败：{exc}")
+                            data = {}
+                for ep_num, ep_title in (data or {}).items():
+                    online_subs[(s, ep_num)] = ep_title
 
         # 季目录重命名
         if self.options.rename_season_folders and mr.season_dirs:

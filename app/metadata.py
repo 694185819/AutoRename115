@@ -981,6 +981,27 @@ class MetadataClient:
 
     def season_episode_titles(self, tmdb_id: str, season: int) -> dict[int, str]:
         """TMDB 整季单集标题：{episode_number: original_name/name}。"""
+        return self.source_episode_titles("tmdb", str(tmdb_id), season)
+
+    # ------------------------------------------------------------ 按来源取名
+    # “命名来源”需要两样东西：该来源自己的剧集条目号、以及该来源自己的
+    # 单集标题。TMDB 有标准季集接口；豆瓣/Bangumi/IMDb 按“条目号 +
+    # 第N季 第N集”反查，查不到就返回空，由调用方退回本地文件名里的标题。
+    # 这样换成别的来源作依据时，不会悄悄混用 TMDB 的特别篇编号或单集标题。
+    def source_episode_titles(self, source: str, sid: str,
+                              season: int) -> dict[int, str]:
+        source = str(source or "").lower()
+        if source == "tmdb":
+            return self._tmdb_episode_titles(sid, season)
+        if source == "bangumi":
+            return self._bangumi_episode_titles(sid, season)
+        if source == "imdb":
+            return self._imdb_episode_titles(sid, season)
+        if source == "douban":
+            return self._douban_episode_titles(sid, season)
+        return {}
+
+    def _tmdb_episode_titles(self, tmdb_id: str, season: int) -> dict[int, str]:
         if not self.tmdb_key or not tmdb_id:
             return {}
         try:
@@ -1011,6 +1032,124 @@ class MetadataClient:
         if out:
             self._cache_put(key, {str(k): v for k, v in out.items()})
         return out
+
+    def _bangumi_episode_titles(self, sid: str, season: int) -> dict[int, str]:
+        """Bangumi 条目下的“本篇/第N季”分集列表。
+
+        Bangumi 用 sort 表示集数；特别篇/SP 常常不在 sort 里（或在别的
+        分集类型里），所以这里只取正片条目，并按 sort 作为集号。
+        """
+        if not sid or self.use_bangumi is False:
+            return {}
+        try:
+            season = int(season)
+        except Exception:
+            return {}
+        key = f"bgm:eps:{sid}:{season}"
+        cached = self._cache_get(key, 7 * 86400)
+        if cached is not None:
+            return {int(k): str(v) for k, v in cached["data"].items()}
+        out: dict[int, str] = {}
+        for ep_type, ep in self._bangumi_episodes(sid):
+            if ep_type not in (0, "0", None, ""):
+                continue          # 0 = 本篇；SP/OP/ED 等不参与正片命名
+            num = ep.get("sort")
+            try:
+                num = int(num)
+            except Exception:
+                continue
+            title = str(ep.get("name_cn") or ep.get("name") or "").strip()
+            if num > 0 and title and not is_generic_episode_title(title):
+                out[num] = title
+        if out:
+            self._cache_put(key, {str(k): v for k, v in out.items()})
+        return out
+
+    def _bangumi_episodes(self, sid: str) -> list[tuple]:
+        """取 Bangumi 条目的分集列表：[(type, episode_dict)]。"""
+        key = f"bgm:episodes:{sid}"
+        cached = self._cache_get(key, 7 * 86400)
+        if cached is not None:
+            return [(e[0], e[1]) for e in cached["data"]]
+        out: list[tuple] = []
+        try:
+            url = (f"https://api.bgm.tv/v0/episodes?subject_id={quote(str(sid))}"
+                   "&type=0&limit=100&offset=0")
+            data = self._get_json(url, "bangumi_detail",
+                                  headers={"User-Agent": BANGUMI_UA}) or {}
+            for ep in (data.get("data") or []):
+                if isinstance(ep, dict):
+                    out.append((ep.get("type"), ep))
+        except Exception as e:
+            self.log(f"Bangumi 分集获取失败（{sid}）：{e}")
+        if out:
+            self._cache_put(key, [[t, ep] for t, ep in out])
+        return out
+
+    def _imdb_episode_titles(self, sid: str, season: int) -> dict[int, str]:
+        """IMDb 某季的分集标题：{集号: 标题}。
+
+        先取剧集总集数结构算出该季起始位置，再按 season.episode 下标
+        精确取标题；结构取不到时不做猜测，返回空。
+        """
+        if not sid or not str(sid).startswith("tt"):
+            return {}
+        try:
+            season = int(season)
+        except Exception:
+            return {}
+        key = f"imdb:eps:{sid}:{season}"
+        cached = self._cache_get(key, 7 * 86400)
+        if cached is not None:
+            return {int(k): str(v) for k, v in cached["data"].items()}
+        self._wait("imdb")
+        query = (
+            'query { title(id: "' + str(sid).replace('"', "") + '") { '
+            'episodes { episodes(first: 9999) { '
+            'series { episodeNumber { episodeNumber seasonNumber } } '
+            'titleText { text } } } } }')
+        out: dict[int, str] = {}
+        try:
+            r = self.session.post(
+                "https://api.graphql.imdb.com/", json={"query": query},
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "x-imdb-client-name": "imdb-web-next",
+                    "x-imdb-user-country": "US",
+                    "x-imdb-user-language": "en-US",
+                }, timeout=25)
+            if r.status_code == 200:
+                title = ((r.json().get("data") or {}).get("title") or {})
+                eps = ((title.get("episodes") or {}).get("episodes") or [])
+                for item in eps:
+                    meta = ((item.get("series") or {})
+                            .get("episodeNumber") or {})
+                    try:
+                        sn = int(meta.get("seasonNumber"))
+                        en = int(meta.get("episodeNumber"))
+                    except Exception:
+                        continue
+                    if sn != season:
+                        continue
+                    text = str(((item.get("titleText") or {}).get("text")
+                                or "")).strip()
+                    if en > 0 and text and not is_generic_episode_title(text):
+                        out[en] = text
+        except Exception as e:
+            self.log(f"IMDb 分集获取失败（{sid} S{season}）：{e}")
+        if out:
+            self._cache_put(key, {str(k): v for k, v in out.items()})
+        return out
+
+    def _douban_episode_titles(self, sid: str, season: int) -> dict[int, str]:
+        """豆瓣单集标题：豆瓣没有稳定的公开分集接口，这里不做联网猜测。
+
+        直接返回空，命名时改用原文件名里的副标题，避免把别的来源的
+        单集标题混进豆瓣依据的文件名。
+        """
+        return {}
+
 
     def tmdb_detail(self, tmdb_id: str, kind: str = "tv") -> Optional[dict]:
         """按 TMDB ID 取标题/年份/地区/类型；先试指定类型，再试另一种。"""

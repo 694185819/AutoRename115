@@ -19,7 +19,7 @@ from urllib.parse import quote, unquote
 
 import requests
 
-APP_VERSION = "0.16"
+APP_VERSION = "0.17"
 REPO_SLUG = "694185819/AutoRename115"
 REPO_URL = f"https://github.com/{REPO_SLUG}"
 RELEASES_URL = f"{REPO_URL}/releases"

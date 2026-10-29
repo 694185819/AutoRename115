@@ -241,6 +241,21 @@ def decide(parsed: ParsedName, media_type: str, category: str,
          if c.extra.get("title_score", 0) >= 0.45],
         key=lambda c: c.score, reverse=True)[:8]
 
+    # 记录各来源自己的条目号，供“按来源命名/取单集标题/取特别篇”使用。
+    refs: dict[str, dict] = {}
+    for source, cand in (("douban", best_db), ("bangumi", res.bangumi),
+                         ("imdb", best_imdb), ("tmdb", best_tmdb)):
+        if not cand or not cand.sid:
+            continue
+        refs[source] = {
+            "id": str(cand.sid),
+            "title": str(cand.title or ""),
+            "original_title": str(cand.original_title or ""),
+            "year": cand.year,
+            "season_title": str(cand.title or ""),
+        }
+    res.source_refs = refs
+
     if not primary and not best_imdb:
         res.notes.append("没有找到匹配，请手动输入标题或改用原名搜索。")
     elif res.confidence < 0.55:

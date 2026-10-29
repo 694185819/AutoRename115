@@ -129,6 +129,15 @@ class MatchResult:
     # 自动搜索的诊断摘要：用了哪些搜索词、各来源第一名、置信度。
     # 显示在任务备注里，方便对照日志排查“为什么匹配成另一部片”。
     trace: str = ""
+    # 各来源各自的条目号：{"douban": {"id": "...", "title": "...", "year": 2019}}
+    # 用于“按来源命名/取副标题/取特别篇”时，按该来源自己的条目号去查。
+    source_refs: dict = field(default_factory=dict)
+
+    def ref(self, source: str) -> dict:
+        """取某来源的条目号信息；没有时返回空 dict。"""
+        refs = self.source_refs if isinstance(self.source_refs, dict) else {}
+        item = refs.get(source)
+        return item if isinstance(item, dict) else {}
 
     @property
     def display_title(self) -> str:
@@ -226,6 +235,9 @@ class PlanItem:
     version_notes: list[str] = field(default_factory=list)
     title_override: str = ""
     year_override: Optional[int] = None
+    # 命名来源："" = 自动；douban/bangumi/imdb/tmdb = 按该来源的条目命名。
+    # 命名来源决定标题、单集副标题和特别篇顺序；命名规则仍按分类决定。
+    name_source: str = ""
     context: dict = field(default_factory=dict, repr=False)
 
     @property

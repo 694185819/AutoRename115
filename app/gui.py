@@ -565,11 +565,18 @@ class App(tk.Tk):
                           ("imdb", "IMDb"), ("tmdb", "TMDB")):
             rb = ttk.Radiobutton(src_row, text=text, value=key,
                                  variable=self.info_source_var,
-                                 command=self._load_info)
+                                 command=self._on_info_source_pick)
             rb.pack(side="left", padx=(8, 0))
             self.info_radios[key] = rb
         self.info_status = ttk.Label(src_row, text="", foreground="#777")
         self.info_status.pack(side="left", padx=10)
+        # 命名来源：勾选后标题、单集副标题、特别篇顺序都按上面选中的来源取，
+        # 不再借用 TMDB。切换来源时自动跟着换。
+        self.name_by_source_var = tk.BooleanVar(value=False)
+        self.name_by_source_btn = ttk.Checkbutton(
+            src_row, text="按此来源命名", variable=self.name_by_source_var,
+            command=self._toggle_naming_source)
+        self.name_by_source_btn.pack(side="right", padx=(8, 0))
 
         body = ttk.Frame(info)
         body.pack(fill="x", pady=(5, 0))
@@ -1970,6 +1977,56 @@ class App(tk.Tk):
             return sid, kind, ""
         return "", "tv", ""
 
+    def _on_info_source_pick(self) -> None:
+        """切换资料来源：若已勾选“按此来源命名”，命名来源跟着换。"""
+        p = self.detail_plan
+        if p is not None and self.name_by_source_var.get():
+            source = self.info_source_var.get()
+            if source and p.name_source != source:
+                self._set_naming_source(p, source)
+                return
+        self._load_info()
+
+    def _toggle_naming_source(self) -> None:
+        """勾选/取消“按此来源命名”。"""
+        p = self.detail_plan
+        if p is None:
+            self.name_by_source_var.set(False)
+            return
+        if not getattr(p, "qc_ops_pending", False) and self.busy:
+            self.name_by_source_var.set(bool(p.name_source))
+            return
+        if self.name_by_source_var.get():
+            source = self.info_source_var.get()
+            if not source:
+                self.name_by_source_var.set(False)
+                messagebox.showinfo(APP_TITLE, "请先选择一个资料来源。",
+                                    parent=self)
+                return
+            self._set_naming_source(p, source)
+        else:
+            self._set_naming_source(p, "")
+
+    def _set_naming_source(self, p: PlanItem, source: str) -> None:
+        """把任务改成按某个来源命名（空 = 回到自动），并重建预览。"""
+        label = SOURCE_LABELS.get(source, source) if source else "自动"
+        p.name_source = source
+        p.title_override = ""       # 来源标题优先，清掉旧的人工标题覆盖
+        try:
+            self.planner.rebuild(p)
+        except Exception as e:
+            self._log(f"按来源重建失败：{e}")
+        self.name_by_source_var.set(bool(source))
+        self._render_plans()
+        self._plan_selected()
+        if source:
+            self._log(f"已改为按 {label} 命名：标题、单集副标题、"
+                      "特别篇顺序都以该来源为准。")
+            self.status_var.set(f"命名来源：{label}")
+        else:
+            self._log("已取消按来源命名，恢复自动匹配。")
+            self.status_var.set("命名来源：自动匹配")
+
     def _refresh_info_sources(self, plan: PlanItem) -> None:
         available = {
             "douban": bool(self._info_source_details(plan, "douban")[0]),
@@ -1990,6 +2047,10 @@ class App(tk.Tk):
                         preferred = key
                         break
             self.info_source_var.set(preferred)
+        # “按此来源命名”跟随当前任务：没选过时默认不勾；已选时保持勾选。
+        self.name_by_source_var.set(bool(getattr(plan, "name_source", "")))
+        self.name_by_source_btn.configure(
+            state="normal" if any(available.values()) else "disabled")
         if not any(available.values()):
             self.info_status.configure(
                 text="没有可用的资料来源，可先手动搜索",
