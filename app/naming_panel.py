@@ -87,53 +87,51 @@ class NamingRulePanel(ttk.LabelFrame):
 
     # ---------------- 界面
     def _build(self) -> None:
-        row = ttk.Frame(self)
-        row.pack(fill="x", pady=(0, 6))
-
-        # 原先把“中文主名称 / . / . / S01E01 / .”做成 5 个独立 Label，
-        # 它们只是展示固定位置；合并成一个标签，少 4 个控件，
-        # 窗口缩放时 Tk 要遍历的节点更少。
-        self._fixed_label(row, "中文主名称 .")
+        # 第一行：把“中文主名称 / 点号 / S01E01”这些固定展示合并成两个标签，
+        # 并且不再额外套一层 Frame —— Tk 重排成本与布局节点数近似线性，
+        # 每省一层容器，拖动缩放时都要快一点。
+        first = ttk.Frame(self)
+        first.pack(fill="x", pady=(0, 2))
+        self._fixed_label(first, "中文主名称 .")
         self.seg_combo = ttk.Combobox(
-            row, textvariable=self.seg_var, state="readonly", width=18,
+            first, textvariable=self.seg_var, state="readonly", width=18,
             values=list(NAME_SOURCE_LABELS.values()))
         self.seg_combo.pack(side="left")
         self.seg_combo.bind("<<ComboboxSelected>>", lambda e: self._refresh())
-        self._fixed_label(row, ". S01E01 .")
+        self._fixed_label(first, ". S01E01 .")
         self.sub_combo = ttk.Combobox(
-            row, textvariable=self.sub_var, state="readonly", width=22,
+            first, textvariable=self.sub_var, state="readonly", width=22,
             values=list(SUBTITLE_LABELS.values()))
         self.sub_combo.pack(side="left")
         self.sub_combo.bind("<<ComboboxSelected>>", lambda e: self._refresh())
 
-        ttk.Label(row, text="规格").pack(side="left", padx=(10, 2))
-        ttk.Radiobutton(row, text="是", value=True,
+        # 第二行：规格开关 + 日番格式 + 电影（都放在同一行，省一层容器）
+        second = ttk.Frame(self)
+        second.pack(fill="x", pady=(2, 2))
+        ttk.Label(second, text="规格").pack(side="left", padx=(0, 2))
+        ttk.Radiobutton(second, text="是", value=True,
                         variable=self.spec_var,
                         command=self._refresh).pack(side="left")
-        ttk.Radiobutton(row, text="否", value=False,
+        ttk.Radiobutton(second, text="否", value=False,
                         variable=self.spec_var,
-                        command=self._refresh).pack(side="left", padx=(2, 0))
-
-        # 预览行同时承担原来那条“灰色为固定内容”的说明，省掉一个静态标签。
-        self.preview = ttk.Label(self, text="", foreground="#176b33",
-                                 wraplength=560, justify="left")
-        self.preview.pack(anchor="w", pady=(4, 0))
-
-        # 日番与电影也在这里统一配置，避免散落到设置窗口。
-        extra = ttk.Frame(self)
-        extra.pack(fill="x", pady=(6, 0))
-        ttk.Label(extra, text="日番文件夹格式").pack(side="left")
+                        command=self._refresh).pack(side="left", padx=(2, 12))
+        ttk.Label(second, text="日番").pack(side="left")
         self.jp_box = ttk.Combobox(
-            extra, textvariable=self.jp_var, state="readonly", width=26,
+            second, textvariable=self.jp_var, state="readonly", width=24,
             values=list(JP_FOLDER_OPTIONS.values()))
         self.jp_box.pack(side="left", padx=(4, 12))
         self.jp_box.bind("<<ComboboxSelected>>", lambda e: self._refresh())
-        ttk.Label(extra, text="电影").pack(side="left")
+        ttk.Label(second, text="电影").pack(side="left")
         self.movie_box = ttk.Combobox(
-            extra, textvariable=self.movie_var, state="readonly", width=26,
+            second, textvariable=self.movie_var, state="readonly", width=22,
             values=[MOVIE_LABELS[k] for k in MOVIE_STYLES])
         self.movie_box.pack(side="left", padx=(4, 0))
         self.movie_box.bind("<<ComboboxSelected>>", lambda e: self._refresh())
+
+        # 预览行：同时承担“灰色为固定内容”的说明，省掉一个纯静态标签。
+        self.preview = ttk.Label(self, text="", foreground="#176b33",
+                                 wraplength=560, justify="left")
+        self.preview.pack(anchor="w", pady=(2, 0))
 
     @staticmethod
     def _fixed_label(parent, text: str) -> ttk.Label:
@@ -141,12 +139,6 @@ class NamingRulePanel(ttk.LabelFrame):
                         background=FIXED_BG, padding=(4, 1))
         lab.pack(side="left")
         return lab
-
-    @staticmethod
-    def _dot(parent) -> None:
-        ttk.Label(parent, text=".", foreground=GREY,
-                  background=FIXED_BG, padding=(3, 1),
-                  font=("Segoe UI", 10, "bold")).pack(side="left")
 
     # ---------------- 数据
     def _source_key(self) -> str:

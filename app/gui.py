@@ -593,19 +593,18 @@ class App(tk.Tk):
         self.map_label.pack(side="left", padx=8)
         # 备注常常很长（搜索诊断 + 疑似重复 + 冲突说明），以前直接用 Label
         # 撑开会挤压下方内容；改成固定高度、可滚动的文本框，并放在最后。
-        note_box = ttk.Frame(detail)
-        note_box.pack(fill="x", pady=(4, 0))
+        # 备注框直接放在 detail 里（省掉一层只做排版的 Frame）
         self.note_label = tk.Text(
-            note_box, height=3, wrap="word", foreground="#a15c00",
+            detail, height=3, wrap="word", foreground="#a15c00",
             background="#fbfaf5", relief="solid", bd=1,
             font=("Microsoft YaHei UI", 9), padx=4, pady=2,
             cursor="arrow")
-        note_sb = ttk.Scrollbar(note_box, orient="vertical",
+        note_sb = ttk.Scrollbar(detail, orient="vertical",
                                 command=self.note_label.yview)
         self.note_label.configure(yscrollcommand=note_sb.set,
                                   state="disabled")
-        self.note_label.pack(side="left", fill="x", expand=True)
-        note_sb.pack(side="right", fill="y")
+        note_sb.pack(side="right", fill="y", pady=(4, 0))
+        self.note_label.pack(side="left", fill="x", expand=True, pady=(4, 0))
         self.note_label.bind("<MouseWheel>", self._on_note_wheel)
         self._note_sb = note_sb
 
@@ -647,6 +646,7 @@ class App(tk.Tk):
         # 影片资料：评分 / 封面 / 简介 / 演员；来源用单选，不用下拉框
         info = ttk.LabelFrame(right, text="影片资料", padding=6)
         info.pack(fill="x", pady=(0, 4))
+        self.info_frame = info
         src_row = ttk.Frame(info)
         src_row.pack(fill="x")
         ttk.Label(src_row, text="资料来源").pack(side="left")
@@ -692,17 +692,16 @@ class App(tk.Tk):
             text_box, textvariable=self.info_rating_var,
             foreground="#a15c00", font=("Microsoft YaHei UI", 9, "bold"))
         self.info_rating_label.pack(anchor="w", pady=(1, 2))
-        ov = ttk.Frame(text_box)
-        ov.pack(fill="x")
+        # 简介框直接放进 text_box（省掉一层只做排版的 Frame）
         self.info_overview = tk.Text(
-            ov, height=3, wrap="word",
+            text_box, height=3, wrap="word",
             font=("Microsoft YaHei UI", 9), state="disabled",
             relief="flat", background="#fbfbfb", foreground="#333")
-        ovs = ttk.Scrollbar(ov, orient="vertical",
+        ovs = ttk.Scrollbar(text_box, orient="vertical",
                             command=self.info_overview.yview)
         self.info_overview.configure(yscrollcommand=ovs.set)
-        self.info_overview.pack(side="left", fill="x", expand=True)
         ovs.pack(side="right", fill="y")
+        self.info_overview.pack(side="left", fill="x", expand=True)
         self.info_cast = ttk.Label(text_box, text="", foreground="#555",
                                    wraplength=820, justify="left")
         self.info_cast.pack(anchor="w", pady=(2, 0))
@@ -712,6 +711,7 @@ class App(tk.Tk):
         # 日志 + 进度
         log_frame = ttk.LabelFrame(right, text="运行日志", padding=3)
         log_frame.pack(fill="both", expand=False, pady=(0, 2))
+        self.log_frame = log_frame
         self.log_text = tk.Text(log_frame, height=4, wrap="word",
                                 font=("Consolas", 9), state="disabled",
                                 background="#fafafa", relief="flat")
@@ -720,6 +720,44 @@ class App(tk.Tk):
         self.log_text.configure(yscrollcommand=lvs.set)
         self.log_text.pack(side="left", fill="both", expand=True)
         lvs.pack(side="right", fill="y")
+
+        # 折叠开关：把“影片资料”和“运行日志”收起后，这些控件会从布局里
+        # 移除，Tk 每次窗口缩放要遍历的节点明显变少，拖动更顺。
+        # 需要看的时候就展开，展开状态会被记住。
+        toggle = ttk.Frame(right)
+        toggle.pack(fill="x", pady=(0, 2))
+        self._toggle_frame = toggle
+        self._info_collapsed = tk.BooleanVar(
+            value=bool(self.settings.get("info_panel_collapsed", False)))
+        self._log_collapsed = tk.BooleanVar(
+            value=bool(self.settings.get("log_panel_collapsed", False)))
+        ttk.Checkbutton(toggle, text="收起影片资料",
+                        variable=self._info_collapsed,
+                        command=self._apply_panel_visibility).pack(side="left")
+        ttk.Checkbutton(toggle, text="收起运行日志",
+                        variable=self._log_collapsed,
+                        command=self._apply_panel_visibility).pack(
+            side="left", padx=(10, 0))
+        self.after(50, self._apply_panel_visibility)
+
+    def _apply_panel_visibility(self) -> None:
+        """按勾选状态挂上/摘下两个折叠区块（摘下后不参与布局）。"""
+        for frame, collapsed, packer in (
+                (self.info_frame, self._info_collapsed,
+                 lambda: self.info_frame.pack(fill="x", pady=(0, 4),
+                                              before=self._toggle_frame)),
+                (self.log_frame, self._log_collapsed,
+                 lambda: self.log_frame.pack(fill="both", expand=False,
+                                             pady=(0, 2)))):
+            try:
+                if collapsed.get():
+                    frame.pack_forget()
+                elif not frame.winfo_manager():
+                    packer()
+            except Exception:
+                pass
+        self.settings["info_panel_collapsed"] = bool(self._info_collapsed.get())
+        self.settings["log_panel_collapsed"] = bool(self._log_collapsed.get())
 
     def _ui_status_bar(self) -> None:
         """底部状态栏与收尾。"""
