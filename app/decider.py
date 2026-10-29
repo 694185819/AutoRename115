@@ -161,6 +161,14 @@ def decide(parsed: ParsedName, media_type: str, category: str,
             best_bg, best_db, best_tmdb = _pick_one(
                 scoring_pools, media_type, combo_picker)
     primary_pool = [c for c in (best_bg, best_db, best_tmdb) if c]
+    # 主结果必须与本地标题指向同一部作品：同系列外传（“祝福”vs“爆焰”）
+    # 相似度很高，但不是同一部剧，不能当主结果。
+    local_title = parsed.title or ""
+    if local_title:
+        filtered = [c for c in primary_pool
+                    if not _is_different_work(local_title, c.title)]
+        if filtered:
+            primary_pool = filtered
     primary = max(primary_pool, key=lambda c: c.score, default=None)
 
     anchor_year = (primary.year if primary and primary.year else parsed.year)
@@ -191,7 +199,13 @@ def decide(parsed: ParsedName, media_type: str, category: str,
     bg_ok = _agrees_with_primary(best_bg, primary)
     if best_bg and not bg_ok:
         res.notes.append(f"忽略来源不一致的 Bangumi 条目：{best_bg.title}")
-    res.douban = best_db
+    # 豆瓣同理：高相似度的同系列外传（“为美好的世界献上祝福！”vs
+    # “为美好的世界献上爆焰！”）不能当成同一部作品，否则主标题、
+    # 单集副标题、影片资料全会被带成另一部剧。
+    db_ok = _agrees_with_primary(best_db, primary)
+    if best_db and not db_ok:
+        res.notes.append(f"忽略来源不一致的豆瓣条目：{best_db.title}")
+    res.douban = best_db if db_ok else None
     res.bangumi = best_bg if bg_ok else None
     res.tmdb = best_tmdb
     res.imdb = best_imdb
@@ -295,8 +309,43 @@ def _agrees_with_primary(c: Optional[Candidate],
             return True
     # 中英文标题不同（IMDb 英文名 vs Bangumi 中文名）时，
     # 只要这条 Bangumi 自己也是高分命中同一个搜索词，仍可采用。
-    return bool(isinstance(c.extra, dict) and
-                c.extra.get("title_score", 0) >= 0.85)
+    ok = bool(isinstance(c.extra, dict) and
+              c.extra.get("title_score", 0) >= 0.85)
+    if not ok:
+        return False
+    # 高相似度的“同系列外传”不是同一部作品：
+    # “为美好的世界献上祝福！”与“为美好的世界献上爆焰！”只差一个词，
+    # 模糊相似度极高，但它们是两部独立的剧，不能互相顶替。
+    return not _is_different_work(primary.title, c.title)
+
+
+def _is_different_work(a: str, b: str) -> bool:
+    """两条标题高度相似但指向不同作品时返回 True。
+
+    判据：
+    - 一边标题尾部多出的只是季/分段说明（第二季、最终季、剧场版）→ 同一作品；
+    - 多出的是实词（爆焰、红传说、外传…）→ 不同作品；
+    - 两边长度接近、只有个别字不同（如“祝福”→“爆焰”）→ 不同作品。
+    """
+    from .scoring import _is_suffix_only
+
+    an, bn = norm_title(a), norm_title(b)
+    if not an or not bn or an == bn:
+        return False
+
+    shorter, longer = (an, bn) if len(an) <= len(bn) else (bn, an)
+    if len(shorter) >= 4 and longer.startswith(shorter):
+        rest = longer[len(shorter):]
+        if rest:
+            return not _is_suffix_only(rest)
+
+    # 长度接近但内容不同：同系列外传常把主标题里的两三个字换掉
+    if abs(len(an) - len(bn)) <= 2 and len(an) >= 6:
+        same = sum(1 for x, y in zip(an, bn) if x == y)
+        ratio = same / max(len(an), len(bn))
+        if ratio >= 0.75:
+            return True
+    return False
 
 
 def _base_title(title: str) -> str:

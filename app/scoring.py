@@ -174,6 +174,7 @@ _SEASON_SUFFIX_WORDS = (
     "上半", "下半", "上卷", "下卷", "篇", "前篇", "后篇",
     "part", "season", "s", "final", "cour",
     "上半季", "下半季", "新章", "续章", "精编版", "总集篇", "剧场版",
+    "最终季", "完结季", "最终章", "finalseason",
     "incarnation", "ova", "oad", "sp",
 )
 
