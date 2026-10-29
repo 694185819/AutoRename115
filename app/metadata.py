@@ -1831,6 +1831,18 @@ class MetadataClient:
         for q in _dedupe_str(imdb_queries)[:8]:
             imdb_all += self.search_imdb(q)
 
+        # 静默补强：豆瓣条目页（登录状态）写着 IMDb / TMDB 编号，
+        # 直接按编号生成候选放进池子——比标题搜索准确得多，
+        # 也不会有同系列外传的误配。整个过程在搜索阶段完成，
+        # 不需要用户点任何按钮。
+        # 放在最后、且先等一下：豆瓣对连续请求有风控，紧接搜索再请求
+        # 常被限流到只剩 2 条，稍等后成功率明显更高。
+        try:
+            time.sleep(0.8)
+        except Exception:
+            pass
+        self._add_ids_from_douban(douban_all, pools, parsed, media_type)
+
         if self.tmdb_key:
             for q in queries[:2]:
                 pools["tmdb"] += self.search_tmdb(q, media_type)
@@ -1838,6 +1850,87 @@ class MetadataClient:
         for c in bangumi_all + douban_all + imdb_all + pools["tmdb"]:
             c.score = self._score(parsed, c, media_type)
         return queries, pools
+
+    def _add_ids_from_douban(self, douban_all: list, pools: dict,
+                             parsed: ParsedName,
+                             media_type: str) -> None:
+        """静默地用豆瓣条目页的 IMDb/TMDB 编号生成候选。
+
+        只在豆瓣候选里挑“确实和本地标题对得上”的几条去读编号，
+        避免为无关条目反复开浏览器。读到的编号直接生成高分候选，
+        放进 imdb / tmdb 池，后续决定阶段自然优先采用。
+        """
+        if not self.browser_profile_dir or not douban_all:
+            return
+        anchors = scoring.anchor_titles(parsed)
+        # 优先读“季号对得上”的豆瓣条目：本地是第一季时，
+        # 不应拿第三季的条目去读编号。
+        # 注意：豆瓣的第一季条目通常就叫「葬送的芙莉莲」，没有季号
+        # （candidate_season 为 None），所以 None 要当成第 1 季看待。
+        def season_rank(d) -> int:
+            if parsed.season is None:
+                return 0
+            cs = candidate_season(d)
+            if cs is None:
+                return 0 if parsed.season == 1 else 1
+            return 0 if cs == parsed.season else 1
+
+        ordered = sorted(
+            douban_all,
+            key=lambda d: (season_rank(d),
+                           -float(getattr(d, "score", 0) or 0)))
+        limit = 0
+        for d in ordered:
+            # 只读最靠前的那一条：再往后往往是同系列外传/特别篇，
+            # 它们的编号会把主条目带偏。
+            if limit >= 1:
+                break
+            if not getattr(d, "sid", ""):
+                continue
+            # 只用标题确实匹配上的豆瓣条目做“编号来源”
+            if anchors and not scoring.candidate_matches_anchor(d, anchors):
+                continue
+            # 与目标季不符的条目不读（避免把第二/三季或外传的编号
+            # 当成主条目的编号）；季号为 None 视为第 1 季，可读。
+            if parsed.season is not None and season_rank(d) != 0:
+                continue
+            limit += 1
+            ids = self.douban_related_ids(d.sid)
+            if not ids:
+                continue
+            imdb_id = ids.get("imdb_id") or ""
+            tmdb_id = ids.get("tmdb_id") or ""
+            if imdb_id and not any(c.sid == imdb_id
+                                   for c in pools["imdb"]):
+                cand = Candidate(
+                    source="imdb",
+                    title=str(getattr(d, "title", "") or ""),
+                    original_title=str(getattr(d, "original_title", "") or ""),
+                    year=getattr(d, "year", None), sid=imdb_id,
+                    kind="tv" if media_type == "series" else "movie",
+                    url=f"https://www.imdb.com/title/{imdb_id}/",
+                    extra={"via_douban_related": True,
+                           "from_douban_sid": d.sid})
+                cand.score = self._score(parsed, cand, media_type)
+                cand.extra["title_score"] = 1.0
+                cand.score = 1.0
+                pools["imdb"].append(cand)
+                self.log(f"豆瓣 {d.sid} 关联到 IMDb {imdb_id}")
+            if tmdb_id and not any(c.sid == tmdb_id
+                                   for c in pools["tmdb"]):
+                cand = Candidate(
+                    source="tmdb",
+                    title=str(getattr(d, "title", "") or ""),
+                    original_title=str(getattr(d, "original_title", "") or ""),
+                    year=getattr(d, "year", None), sid=tmdb_id,
+                    kind="tv" if media_type == "series" else "movie",
+                    url=f"https://www.themoviedb.org/tv/{tmdb_id}",
+                    extra={"via_douban_related": True,
+                           "from_douban_sid": d.sid})
+                cand.score = 1.0
+                cand.extra["title_score"] = 1.0
+                pools["tmdb"].append(cand)
+                self.log(f"豆瓣 {d.sid} 关联到 TMDB {tmdb_id}")
 
     def match(self, parsed: ParsedName, media_type: str,
               category: str = "") -> MatchResult:
