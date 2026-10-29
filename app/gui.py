@@ -4190,14 +4190,20 @@ class SettingsDialog(tk.Toplevel):
         api_link.bind("<space>", self._open_tmdb_api)
         api_link.configure(takefocus=True)
         ttk.Label(frame,
-                  text="豆瓣 Cookie（可选；只有“按豆瓣命名”需要）。"
-                       "粘贴浏览器里 movie.douban.com 的 Cookie 后，"
-                       "才能读豆瓣的分集页取单集名。",
+                  text="豆瓣 Cookie（可选；填了才读豆瓣分集页的“本集中文名”）。"
+                       "不填也能用 Bangumi / IMDb / TMDB 取名。",
                   foreground="#555", wraplength=520).pack(anchor="w", pady=(8, 0))
+        cookie_row = ttk.Frame(frame)
+        cookie_row.pack(fill="x", pady=3)
         self.douban_cookie_var = tk.StringVar(
             value=s.get("douban_cookie", ""))
-        ttk.Entry(frame, textvariable=self.douban_cookie_var,
-                  width=60, show="•").pack(anchor="w", pady=3)
+        ttk.Entry(cookie_row, textvariable=self.douban_cookie_var,
+                  width=44, show="•").pack(side="left")
+        ttk.Button(cookie_row, text="打开豆瓣…",
+                   command=lambda: webbrowser.open(
+                       "https://movie.douban.com/")).pack(side="left", padx=6)
+        ttk.Button(cookie_row, text="从剪贴板粘贴",
+                   command=self._paste_douban_cookie).pack(side="left")
         ttk.Label(frame, text="命名规则：日番=标题 S01E01；电视剧/国产动画=标题 S01E01 [1080p WEB-DL HEVC]；电影=标题 (年份)。",
                   wraplength=520, foreground="#555").pack(anchor="w", pady=(8, 0))
         ttk.Separator(frame).pack(fill="x", pady=(10, 8))
@@ -4234,6 +4240,28 @@ class SettingsDialog(tk.Toplevel):
             messagebox.showinfo(
                 "TMDB API Key", f"请手动在浏览器打开：\n{url}", parent=self)
         return "break"
+
+    def _paste_douban_cookie(self) -> None:
+        """从剪贴板填入豆瓣 Cookie，并做基本校验与提示。"""
+        try:
+            text = self.clipboard_get()
+        except Exception:
+            text = ""
+        text = (text or "").strip().replace("\n", " ")
+        if not text:
+            messagebox.showinfo(
+                APP_TITLE,
+                "剪贴板是空的。\n请先在浏览器里复制 "
+                "movie.douban.com 请求头的 Cookie。", parent=self)
+            return
+        if not any(k in text for k in ("bid=", "dbcl2=", "ll=")):
+            if not messagebox.askyesno(
+                    APP_TITLE,
+                    "剪贴板内容看起来不像豆瓣 Cookie"
+                    "（没有 bid / dbcl2 / ll）。\n仍然填入吗？", parent=self):
+                return
+        self.douban_cookie_var.set(text)
+        self.app._log(f"已填入豆瓣 Cookie（{len(text)} 字符），保存后生效。")
 
     def save(self) -> None:
         self.app.apply_settings({

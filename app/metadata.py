@@ -1207,12 +1207,30 @@ class MetadataClient:
         if 'name="cha"' in text or "载入中" in text:
             return {"ok": False, "reason": "需要登录或被验证页拦截"}
         title = ""
-        m = re.search(
-            r"本集中文名\s*[:：]?\s*</?\w[^>]*>\s*([^<]{1,120})", text)
-        if not m:
+        # 真实结构：<li><span>本集中文名:</span> … <span class="all">灯塔和光影会</span></li>
+        # 冒号后可能跨标签并带换行，所以先定位标签，再取同一 li 里的 .all。
+        for m in re.finditer(r"<li[^>]*>\s*<span>\s*本集中文名\s*[:：]\s*</span>"
+                             r"(.*?)</li>", text, re.S):
+            block = m.group(1)
+            am = re.search(r'<span[^>]*class="all"[^>]*>(.*?)</span>', block,
+                           re.S)
+            value = am.group(1) if am else re.sub(r"<[^>]+>", " ", block)
+            title = self._clean_html_text(value)
+            if title:
+                break
+        if not title:
             m = re.search(r"本集中文名\s*[:：]\s*([^<]{1,120})", text)
-        if m:
-            title = self._clean_html_text(m.group(1))
+            if m:
+                title = self._clean_html_text(m.group(1))
+        # 集号校验：页面必须确实是“第 ep 集”，否则说明被重定向/缓存命中，
+        # 不能把同一集名套到每一集上。
+        if title:
+            em = re.search(r"<title>(.*?)</title>", text, re.S)
+            page_title = self._clean_html_text(em.group(1)) if em else ""
+            shown = re.search(r"第\s*(\d+)\s*集", page_title)
+            if shown and int(shown.group(1)) != int(ep):
+                return {"ok": False,
+                        "reason": f"页面集号不符（期望第{ep}集，实际第{shown.group(1)}集）"}
         if not title:
             # 页面标题形如 “灵笼 第一季 第1集 灯塔和光影会(豆瓣)”
             tm = re.search(r"<title>(.*?)</title>", text, re.S)
