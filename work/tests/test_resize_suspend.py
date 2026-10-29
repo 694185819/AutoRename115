@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""窗口缩放：拖动时收起右栏降低重排开销，停手后完整恢复。"""
+"""窗口缩放：界面全程可见、不闪烁；尺寸事件不会重复触发收尾。"""
 import sys
 import time
 
@@ -16,42 +16,42 @@ def main():
     for _ in range(20):
         app.update()
 
-    right = app.paned.winfo_children()[-1]
-    before = [w.winfo_height() for w in right.winfo_children()
-              if w.winfo_manager() == "pack"]
-    assert before, "右栏应有多个区块"
-    assert not app._right_hidden
+    right = app._right_frame
+    kids = [w for w in right.winfo_children() if w.winfo_manager() == "pack"]
+    assert kids, "右栏应有多个区块"
+    count_before = len(kids)
 
-    # 改变窗口尺寸 → 右栏应被临时收起
+    # 拖动过程中：右栏必须始终可见（不能消失、不能闪烁）
     bw, bh = app.winfo_width(), app.winfo_height()
-    app.geometry(f"{bw + 80}x{bh + 50}")
-    app.update()
-    assert app._right_hidden, "拖动时应收起右栏"
-    assert len(app._right_packed) == len(before), (
-        len(app._right_packed), len(before))
-    assert not [w for w in right.winfo_children()
-                if w.winfo_manager() == "pack"], "右栏区块应已从布局移除"
+    for i in range(6):
+        app.geometry(f"{bw + (i % 4) * 20}x{bh + (i % 3) * 15}")
+        app.update_idletasks()
+        visible = [w for w in right.winfo_children()
+                   if w.winfo_manager() == "pack" and w.winfo_ismapped()]
+        assert len(visible) == count_before, (
+            "拖动中右栏区块不应消失", len(visible), count_before)
 
-    # 停手后恢复
-    deadline = time.time() + 3
-    while time.time() < deadline and app._right_hidden:
+    # 不应存在任何隐藏/冻结右侧的状态字段
+    assert not hasattr(app, "_right_hidden"), "不应残留隐藏状态"
+    assert not hasattr(app, "_right_frozen"), "不应残留冻结状态"
+
+    # 停手后尺寸归位，各区块高度正常
+    deadline = time.time() + 2
+    while time.time() < deadline and app._resize_job is not None:
         app.update()
         time.sleep(0.02)
-    assert not app._right_hidden, "停手后应恢复布局"
+    heights = [w.winfo_height() for w in right.winfo_children()
+               if w.winfo_manager() == "pack"]
+    print("恢复后区块高度:", heights)
+    assert len(heights) == count_before
+    assert all(h > 0 for h in heights), heights
 
-    after = [w.winfo_height() for w in right.winfo_children()
-             if w.winfo_manager() == "pack"]
-    assert len(after) == len(before), (after, before)
-    assert all(h > 0 for h in after), after
-    print("恢复后区块高度:", after)
-
-    # 数据未被破坏：任务表与备注仍可用
+    # 数据未被破坏
     assert app.plan_tree.winfo_exists()
-    assert app.note_label.winfo_exists()
     assert str(app.note_label.cget("state")) == "disabled"
 
     app.destroy()
-    print("RESIZE SUSPEND OK")
+    print("RESIZE VISIBLE OK")
 
 
 if __name__ == "__main__":

@@ -90,16 +90,16 @@ class NamingRulePanel(ttk.LabelFrame):
         row = ttk.Frame(self)
         row.pack(fill="x", pady=(0, 6))
 
-        self.title_box = self._fixed_label(row, "中文主名称")
-        self._dot(row)
+        # 原先把“中文主名称 / . / . / S01E01 / .”做成 5 个独立 Label，
+        # 它们只是展示固定位置；合并成一个标签，少 4 个控件，
+        # 窗口缩放时 Tk 要遍历的节点更少。
+        self._fixed_label(row, "中文主名称 .")
         self.seg_combo = ttk.Combobox(
             row, textvariable=self.seg_var, state="readonly", width=18,
             values=list(NAME_SOURCE_LABELS.values()))
         self.seg_combo.pack(side="left")
         self.seg_combo.bind("<<ComboboxSelected>>", lambda e: self._refresh())
-        self._dot(row)
-        self._fixed_label(row, "S01E01")
-        self._dot(row)
+        self._fixed_label(row, ". S01E01 .")
         self.sub_combo = ttk.Combobox(
             row, textvariable=self.sub_var, state="readonly", width=22,
             values=list(SUBTITLE_LABELS.values()))
@@ -114,11 +114,9 @@ class NamingRulePanel(ttk.LabelFrame):
                         variable=self.spec_var,
                         command=self._refresh).pack(side="left", padx=(2, 0))
 
-        ttk.Label(self, text="灰色为固定内容：中文主名称取自任务标题，"
-                             "SxxExx 按文件夹/文件推断，点号为固定分隔符。",
-                  foreground="#777").pack(anchor="w")
+        # 预览行同时承担原来那条“灰色为固定内容”的说明，省掉一个静态标签。
         self.preview = ttk.Label(self, text="", foreground="#176b33",
-                                 wraplength=520, justify="left")
+                                 wraplength=560, justify="left")
         self.preview.pack(anchor="w", pady=(4, 0))
 
         # 日番与电影也在这里统一配置，避免散落到设置窗口。
@@ -136,8 +134,6 @@ class NamingRulePanel(ttk.LabelFrame):
             values=[MOVIE_LABELS[k] for k in MOVIE_STYLES])
         self.movie_box.pack(side="left", padx=(4, 0))
         self.movie_box.bind("<<ComboboxSelected>>", lambda e: self._refresh())
-        ttk.Label(extra, text="（电影目前只有这一种写法）",
-                  foreground="#777").pack(side="left", padx=(6, 0))
 
     @staticmethod
     def _fixed_label(parent, text: str) -> ttk.Label:
@@ -187,8 +183,9 @@ class NamingRulePanel(ttk.LabelFrame):
             jp_example = "86 -不存在的战区 (2021) [imdbid-tt13718450]"
         movie_example = "朝花夕拾 (2018) [imdbid-tt9691596]"
         self.preview.configure(
-            text=f"剧集：{sample}\n日番文件夹：{jp_example}\n"
-                 f"电影：{movie_example}")
+            text=f"灰色为固定项（中文主名称取自任务标题，SxxExx 按文件推断）\n"
+                 f"剧集：{sample}\n日番文件夹：{jp_example}\n"
+                 f"电影：{movie_example}（目前只有这一种写法）")
         self._apply()
 
     def _refresh(self) -> None:
