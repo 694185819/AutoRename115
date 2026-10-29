@@ -1145,13 +1145,41 @@ class MetadataClient:
         return out
 
     def _douban_episode_titles(self, sid: str, season: int) -> dict[int, str]:
-        """豆瓣分集标题：解析 /subject/<sid>/episode/<N>/ 页面里的“本集中文名”。
+        """豆瓣分集标题：优先用本机浏览器内核读取（豆瓣对普通 HTTP 客户端
+        返回 JS 挑战页，只带 Cookie 读不到内容）。
 
-        豆瓣分集页要登录才给内容，未登录会被挡到验证页；这里在设置了
-        `douban_cookie` 时带上 Cookie 抓一页，成功解析后先用第 1 集确认
-        可读，再按需抓后续集（受 douban 限速约束）。任一环节失败都返回空，
-        由上层改用原文件名的副标题，绝不编造。
+        顺序：浏览器内核 →（有 Cookie 时）直连解析 → 空。
+        任一环节拿不到就返回空，由上层改用原文件名副标题。
         """
+        if not str(sid).isdigit():
+            return {}
+        try:
+            season = int(season)
+        except Exception:
+            return {}
+        key = f"douban:eps:{sid}:{season}"
+        cached = self._cache_get(key, 7 * 86400)
+        if cached is not None:
+            return {int(k): str(v) for k, v in cached["data"].items()}
+
+        out: dict[int, str] = {}
+        mode = str(getattr(self, "douban_mode", "browser") or "browser")
+        if mode != "http":
+            try:
+                from .douban_browser import fetch_douban_episode_titles
+                out = fetch_douban_episode_titles(sid, season, log=self.log)
+            except Exception as e:      # noqa: BLE001
+                self.log(f"浏览器读取豆瓣分集失败：{e}")
+                out = {}
+        if not out:
+            out = self._douban_episode_titles_http(sid, season)
+        if out:
+            self._cache_put(key, {str(k): v for k, v in out.items()})
+        return out
+
+    def _douban_episode_titles_http(self, sid: str,
+                                    season: int) -> dict[int, str]:
+        """直连豆瓣分集页（需要 Cookie；多数情况下会被 JS 挑战页拦截）。"""
         cookie = str(getattr(self, "douban_cookie", "") or "").strip()
         if not cookie or not str(sid).isdigit():
             return {}

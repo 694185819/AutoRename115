@@ -73,6 +73,7 @@ class FakeSession:
 
 def make_client(pages):
     m = MetadataClient("", use_bangumi=False)
+    m.douban_mode = "http"   # 强制直连分支，避免测试触发浏览器内核
     m.douban_cookie = "bid=fake; dbcl2=x"
     m.session = FakeSession(pages)
     m.delays["douban"] = 0.0
@@ -95,6 +96,7 @@ def main():
 
     # 没有 Cookie：不联网，直接空
     m2 = MetadataClient("", use_bangumi=False)
+    m2.douban_mode = "http"
     m2.session = FakeSession({})
     assert m2._douban_episode_titles("27121260", 1) == {}
     assert m2.session.calls == 0, "没有 Cookie 时不应发请求"
@@ -114,6 +116,34 @@ def main():
                       base.format(2): PAGE_REAL})
     titles5 = m5._douban_episode_titles("27121260", 1)
     assert titles5 == {1: "灯塔和光影会"}, titles5
+
+    # 浏览器内核不可用时，自动回退到直连解析
+    import app.douban_browser as db
+    real = db.fetch_douban_episode_titles
+    db.fetch_douban_episode_titles = lambda *a, **k: {}
+    try:
+        m6 = MetadataClient("", use_bangumi=False)
+        m6.douban_mode = "browser"
+        m6.douban_cookie = "bid=fake; dbcl2=x"
+        m6.session = FakeSession({base.format(1): PAGE_REAL,
+                                  base.format(2): PAGE_TITLE_ONLY,
+                                  base.format(3): PAGE_BLOCKED})
+        m6.delays["douban"] = 0.0
+        titles6 = m6._douban_episode_titles("27121260", 1)
+        assert titles6.get(1) == "灯塔和光影会", titles6
+    finally:
+        db.fetch_douban_episode_titles = real
+
+    # 浏览器内核可用时优先使用它的结果
+    db.fetch_douban_episode_titles = lambda *a, **k: {1: "浏览器集名"}
+    try:
+        m7 = MetadataClient("", use_bangumi=False)
+        m7.douban_mode = "browser"
+        m7.session = FakeSession({})
+        titles7 = m7._douban_episode_titles("27121261", 1)
+        assert titles7 == {1: "浏览器集名"}, titles7
+    finally:
+        db.fetch_douban_episode_titles = real
 
     print("DOUBAN EPISODES OK")
 

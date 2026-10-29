@@ -724,6 +724,7 @@ class App(tk.Tk):
         "nfo_save": "_on_nfo_save",
         "nfo_clear": "_on_nfo_clear",
         "rebuild_done": "_on_rebuild_done",
+        "douban_test": "_on_douban_test",
     }
 
     def _handle(self, kind: str, payload) -> None:
@@ -2089,6 +2090,14 @@ class App(tk.Tk):
             self._log(f"重建预览失败：{err}")
         if callable(fn):
             fn(ok, err)
+
+    def _on_douban_test(self, payload) -> None:
+        dialog, page = payload
+        try:
+            if dialog.winfo_exists():
+                dialog._show_douban_test(page)
+        except Exception:
+            pass
 
     def _refresh_info_sources(self, plan: PlanItem) -> None:
         available = {
@@ -4190,8 +4199,10 @@ class SettingsDialog(tk.Toplevel):
         api_link.bind("<space>", self._open_tmdb_api)
         api_link.configure(takefocus=True)
         ttk.Label(frame,
-                  text="豆瓣 Cookie（可选；填了才读豆瓣分集页的“本集中文名”）。"
-                       "不填也能用 Bangumi / IMDb / TMDB 取名。",
+                  text="豆瓣单集名：使用本机已安装的 Chrome / Edge 读取"
+                       "（豆瓣会拦截普通 HTTP 请求，必须走浏览器）。"
+                       "浏览器信息只在本机使用，不上传。"
+                       "Cookie 仅在浏览器取不到时作为补充，可不填。",
                   foreground="#555", wraplength=520).pack(anchor="w", pady=(8, 0))
         cookie_row = ttk.Frame(frame)
         cookie_row.pack(fill="x", pady=3)
@@ -4204,6 +4215,11 @@ class SettingsDialog(tk.Toplevel):
                        "https://movie.douban.com/")).pack(side="left", padx=6)
         ttk.Button(cookie_row, text="从剪贴板粘贴",
                    command=self._paste_douban_cookie).pack(side="left")
+        self.douban_test_btn = ttk.Button(
+            cookie_row, text="测试豆瓣连接", command=self._test_douban_cookie)
+        self.douban_test_btn.pack(side="left", padx=6)
+        self.douban_test_label = ttk.Label(frame, text="", foreground="#777")
+        self.douban_test_label.pack(anchor="w")
         ttk.Label(frame, text="命名规则：日番=标题 S01E01；电视剧/国产动画=标题 S01E01 [1080p WEB-DL HEVC]；电影=标题 (年份)。",
                   wraplength=520, foreground="#555").pack(anchor="w", pady=(8, 0))
         ttk.Separator(frame).pack(fill="x", pady=(10, 8))
@@ -4262,6 +4278,43 @@ class SettingsDialog(tk.Toplevel):
                 return
         self.douban_cookie_var.set(text)
         self.app._log(f"已填入豆瓣 Cookie（{len(text)} 字符），保存后生效。")
+
+    def _test_douban_cookie(self) -> None:
+        """用当前输入框里的 Cookie 实测一次豆瓣分集页，结果直接显示。"""
+        cookie = self.douban_cookie_var.get().strip()
+        if not cookie:
+            self.douban_test_label.configure(
+                text="没有填 Cookie：软件不会请求豆瓣，副标题只能用原文件名。",
+                foreground="#b3261e")
+            return
+        self.douban_test_label.configure(text="测试中…", foreground="#555")
+        self.douban_test_btn.configure(state="disabled")
+        dialog = self
+
+        def worker():
+            from .metadata import MetadataClient
+            m = MetadataClient("", use_bangumi=False)
+            m.douban_cookie = cookie
+            m.delays["douban"] = 0.0
+            try:
+                # 用一份稳定的剧集条目做探针（灵笼 第一季 第1集）
+                page = m._douban_episode_page("27121260", 1, 1)
+            except Exception as e:      # noqa: BLE001
+                page = {"ok": False, "reason": str(e)}
+            dialog.app.post("douban_test", (dialog, page))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _show_douban_test(self, page: dict) -> None:
+        self.douban_test_btn.configure(state="normal")
+        if page.get("ok"):
+            title = page.get("title") or "（该集没有集名）"
+            self.douban_test_label.configure(
+                text=f"豆瓣可读：第1集 = {title}", foreground="#176b33")
+        else:
+            self.douban_test_label.configure(
+                text="豆瓣不可读：" + str(page.get("reason") or "未知原因"),
+                foreground="#b3261e")
 
     def save(self) -> None:
         self.app.apply_settings({
