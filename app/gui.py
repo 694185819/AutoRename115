@@ -60,11 +60,12 @@ SHORT_CATEGORY = {
     "us_anime": "美漫", "west_anime": "欧美",
     "tv": "电视剧", "movie": "电影",
 }
+# 日番文件夹格式：设置里只提供两种。历史上还有 bdremux_suffix /
+# bdremux_no_year 两种写法，planner 仍能识别，但不再出现在下拉框中；
+# 旧配置落到这里时按默认“你的风格”处理。
 JP_FOLDER_LABELS = {
     "standard": "标准：中文名 (年份) [ID]",
     "bdremux": "[BD-REMUX]中文名 日文名 (年份) [ID]",
-    "bdremux_suffix": "中文名 日文名 (年份) [ID] [BD-REMUX]",
-    "bdremux_no_year": "[BD-REMUX]中文名 日文名 [ID]",
 }
 JP_LABEL_TO_KEY = {v: k for k, v in JP_FOLDER_LABELS.items()}
 
@@ -4009,6 +4010,7 @@ class SettingsDialog(tk.Toplevel):
         self.title("设置")
         self.resizable(False, False)
         self.transient(app)
+        # 先占位，内容构建完再按实际高度调整（见文件末尾的 _fit_window）
         app._center_window(self, 560, 610, parent=app)
         self.grab_set()
         s = app.settings
@@ -4042,9 +4044,13 @@ class SettingsDialog(tk.Toplevel):
         jp_row.pack(anchor="w", pady=3)
         ttk.Label(jp_row, text="日番文件夹格式").pack(side="left")
         cur_style = s.get("jp_folder_style", "bdremux")
+        if cur_style not in JP_FOLDER_LABELS:
+            # 旧配置里的 bdremux_suffix / bdremux_no_year 已不在选项中，
+            # 按默认“你的风格”显示并保存。
+            cur_style = "bdremux"
         self.jp_style_var = tk.StringVar(
             value=JP_FOLDER_LABELS.get(cur_style,
-                                       JP_FOLDER_LABELS["standard"]))
+                                       JP_FOLDER_LABELS["bdremux"]))
         ttk.Combobox(jp_row, textvariable=self.jp_style_var,
                      state="readonly", width=42,
                      values=list(JP_FOLDER_LABELS.values())).pack(
@@ -4107,11 +4113,26 @@ class SettingsDialog(tk.Toplevel):
         api_link.configure(takefocus=True)
         ttk.Label(frame, text="命名规则：日番=标题 S01E01；电视剧/国产动画=标题 S01E01 [1080p WEB-DL HEVC]；电影=标题 (年份)。",
                   wraplength=520, foreground="#555").pack(anchor="w", pady=(8, 0))
+        ttk.Separator(frame).pack(fill="x", pady=(10, 8))
+        # 按钮区改为正常顺序靠底，不再用 side="bottom" 与内容争抢空间：
+        # 以前内容自然高度超过 610px 时，按钮会被压成一条细条。
         btns = ttk.Frame(frame)
-        btns.pack(side="bottom", fill="x", pady=(16, 0))
+        btns.pack(fill="x")
         ttk.Button(btns, text="关于…", command=self.open_about).pack(side="left")
         ttk.Button(btns, text="保存", command=self.save).pack(side="right", padx=4)
         ttk.Button(btns, text="取消", command=self.destroy).pack(side="right")
+        self._fit_to_content(frame)
+
+    def _fit_to_content(self, frame) -> None:
+        """按内容实际需要的高度调整窗口，按钮区不再被挤压。"""
+        self.update_idletasks()
+        need_h = frame.winfo_reqheight()
+        need_w = max(560, frame.winfo_reqwidth())
+        self.geometry(f"{need_w}x{need_h}")
+        self.minsize(need_w, need_h)
+        self.app._center_window(self, need_w, need_h, parent=self.app)
+        self.after(30, lambda: self.app._center_window(
+            self, need_w, need_h, parent=self.app))
 
     def open_about(self) -> None:
         AboutDialog(self.app)
@@ -4140,7 +4161,7 @@ class SettingsDialog(tk.Toplevel):
             "imdb_id_style": self.style_var.get(),
             "id_provider": self.provider_var.get(),
             "jp_folder_style": JP_LABEL_TO_KEY.get(
-                self.jp_style_var.get(), "standard"),
+                self.jp_style_var.get(), "bdremux"),
             "tmdb_key": self.tmdb_var.get().strip(),
             "login_app": self.login_app_var.get(),
         })
