@@ -14,9 +14,11 @@ from __future__ import annotations
 import os
 import sys
 import threading
+import time
 
-from PySide6.QtCore import Qt, QTimer, QUrl
-from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont
+from PySide6.QtCore import QObject, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFont,
+                           QPixmap)
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox,
                                QComboBox, QDialog, QFormLayout, QGroupBox,
                                QHBoxLayout, QHeaderView, QLabel, QLineEdit,
@@ -619,6 +621,250 @@ class EpisodeMappingDialog(QDialog):
         self.accept()
 
 
+class _UiSignal(QObject):
+    """把后台线程的回调排队交给界面线程执行。"""
+
+    fn = Signal(object)
+
+
+class LoginDialog(QDialog):
+    """115 扫码登录：与 Tk 版同一套接口（qr_token / qr_image / qr_status）。
+
+    二维码在后台线程里轮询，界面线程只负责刷新显示。
+    """
+
+    def __init__(self, parent, app, client):
+        super().__init__(parent)
+        self.app = app
+        self.client = client
+        self.stop = threading.Event()
+        self.token = None
+        self._login_app = "ios"
+        # 后台线程 → 界面线程：用信号排队，比在子线程里调 singleShot 可靠
+        self._sig = _UiSignal()
+        self._sig.fn.connect(self._run_ui)
+        self.setWindowTitle("登录 115")
+        self.setFixedSize(420, 620)
+
+        lay = QVBoxLayout(self)
+        title = QLabel("请用 115 手机 App 扫码登录")
+        f = QFont(self.font())
+        f.setPointSize(12)
+        f.setBold(True)
+        title.setFont(f)
+        title.setAlignment(Qt.AlignCenter)
+        lay.addWidget(title)
+        tip = QLabel("扫码一次后会记住登录；换新版本也不用再扫。")
+        tip.setStyleSheet("color:#176b33;")
+        tip.setAlignment(Qt.AlignCenter)
+        lay.addWidget(tip)
+
+        dev_row = QHBoxLayout()
+        dev_row.addStretch(1)
+        dev_row.addWidget(QLabel("登录设备"))
+        self.combo_app = QComboBox()
+        self.combo_app.addItems(["ios", "android", "web"])
+        self.combo_app.setCurrentText(
+            str((getattr(app, "settings", {}) or {}).get("login_app", "ios")))
+        self.combo_app.currentTextChanged.connect(lambda _t: self.refresh_qr())
+        dev_row.addWidget(self.combo_app)
+        dev_row.addStretch(1)
+        lay.addLayout(dev_row)
+
+        hint = QLabel("建议 ios：不影响安卓手机和网页登录。\n"
+                      "android 可能踢掉手机 App；web 会踢掉网页登录。")
+        hint.setStyleSheet("color:#777;")
+        hint.setAlignment(Qt.AlignCenter)
+        lay.addWidget(hint)
+
+        self.qr_label = QLabel("正在获取二维码…")
+        self.qr_label.setAlignment(Qt.AlignCenter)
+        self.qr_label.setMinimumHeight(300)
+        lay.addWidget(self.qr_label, 1)
+
+        self.status_label = QLabel("")
+        self.status_label.setAlignment(Qt.AlignCenter)
+        lay.addWidget(self.status_label)
+
+        btns = QHBoxLayout()
+        btns.addStretch(1)
+        self.btn_refresh = QPushButton("刷新二维码")
+        self.btn_cookie = QPushButton("用 Cookie 登录…")
+        self.btn_cancel = QPushButton("取消")
+        btns.addWidget(self.btn_refresh)
+        btns.addWidget(self.btn_cookie)
+        btns.addWidget(self.btn_cancel)
+        btns.addStretch(1)
+        lay.addLayout(btns)
+        self.btn_refresh.clicked.connect(self.refresh_qr)
+        self.btn_cookie.clicked.connect(self._open_cookie)
+        self.btn_cancel.clicked.connect(self.reject)
+
+        QTimer.singleShot(50, self.start_login)
+
+    # ---------------- 登录流程
+    def start_login(self) -> None:
+        self._login_app = self.combo_app.currentText()
+        self.stop.clear()
+        threading.Thread(target=self._worker, daemon=True).start()
+
+    def _worker(self) -> None:
+        """后台轮询（与 Tk 版逻辑一致）。"""
+        try:
+            token = self.client.qr_token()
+            image = self.client.qr_image(token["uid"])
+            self._ui(lambda: self.show_token(token, image))
+            while not self.stop.is_set():
+                status = self.client.qr_status(token)
+                self._ui(lambda s=status: self.show_status(s))
+                if status == 2:
+                    ok = self.client.qr_login(token["uid"],
+                                              app=self._login_app)
+                    self._ui(lambda ok=ok: self._on_login(ok))
+                    return
+                if status in (-1, -2, -3):
+                    self._ui(lambda s=status: self.show_expired(s))
+                    return
+                time.sleep(1.0)
+        except Exception as e:      # noqa: BLE001
+            self._ui(lambda: self.show_error(str(e)))
+
+    def _ui(self, fn) -> None:
+        """从后台线程回到界面线程执行。"""
+        self._sig.fn.emit(fn)
+
+    def _run_ui(self, fn) -> None:
+        try:
+            fn()
+        except Exception:
+            pass
+
+    def show_token(self, token: dict, image: bytes) -> None:
+        self.token = token
+        try:
+            from PySide6.QtGui import QPixmap
+            pix = QPixmap()
+            if pix.loadFromData(image):
+                self.qr_label.setPixmap(pix.scaled(
+                    280, 280, Qt.KeepAspectRatio, Qt.FastTransformation))
+            else:
+                self.qr_label.setText("二维码图片加载失败")
+        except Exception as e:      # noqa: BLE001
+            self.qr_label.setText(f"二维码显示失败：{e}")
+        self.status_label.setText("请用手机扫描上方二维码")
+
+    def show_status(self, status: int) -> None:
+        if status == 1:
+            self.status_label.setText("已扫码，请在手机上确认登录")
+            self.status_label.setStyleSheet("color:#176b33;")
+
+    def show_expired(self, status: int) -> None:
+        self.status_label.setText(
+            "二维码已过期" if status == -1 else "已取消登录")
+        self.status_label.setStyleSheet("color:#b3261e;")
+
+    def show_error(self, msg: str) -> None:
+        self.status_label.setText(f"登录失败：{msg}")
+        self.status_label.setStyleSheet("color:#b3261e;")
+
+    def _on_login(self, ok: bool) -> None:
+        if ok:
+            self.status_label.setText("登录成功")
+            self.status_label.setStyleSheet("color:#176b33;")
+            # 通知业务层刷新状态
+            post = getattr(self.app, "post", None)
+            if callable(post):
+                try:
+                    post("login_check", True)
+                except Exception:
+                    pass
+            QTimer.singleShot(400, self.accept)
+        else:
+            self.show_expired(-2)
+
+    def refresh_qr(self) -> None:
+        self.stop.set()
+        self.qr_label.setPixmap(QPixmap())
+        self.qr_label.setText("正在刷新二维码…")
+        self.status_label.setText("")
+        QTimer.singleShot(300, self.start_login)
+
+    def _open_cookie(self) -> None:
+        CookieDialog(self, self.app, self.client).exec()
+
+    def closeEvent(self, event) -> None:
+        self.stop.set()
+        super().closeEvent(event)
+
+
+class CookieDialog(QDialog):
+    """导入 115 Cookie 并验证。"""
+
+    def __init__(self, parent, app, client):
+        super().__init__(parent)
+        self.app = app
+        self.client = client
+        self.setWindowTitle("导入 115 Cookie")
+        self.resize(620, 360)
+
+        lay = QVBoxLayout(self)
+        lay.addWidget(QLabel(
+            "把浏览器里 115.com 的 Cookie 粘贴到下面"
+            "（至少包含 UID、CID、SEID、KID）。"))
+        hint = QLabel("格式示例：UID=123_CID=abc_SEID=def_KID=ghi"
+                      "（分号或换行分隔均可）")
+        hint.setStyleSheet("color:#777;")
+        lay.addWidget(hint)
+        self.text = QTextEdit()
+        lay.addWidget(self.text, 1)
+        self.msg = QLabel("")
+        self.msg.setStyleSheet("color:#b3261e;")
+        lay.addWidget(self.msg)
+        btns = QHBoxLayout()
+        btns.addStretch(1)
+        btn_ok = QPushButton("验证并保存")
+        btn_cancel = QPushButton("取消")
+        btns.addWidget(btn_ok)
+        btns.addWidget(btn_cancel)
+        lay.addLayout(btns)
+        btn_ok.clicked.connect(self.save)
+        btn_cancel.clicked.connect(self.reject)
+
+    def save(self) -> None:
+        text = self.text.toPlainText().strip()
+        if not text:
+            self.msg.setText("请先粘贴 Cookie。")
+            return
+        try:
+            self.client.set_cookie_text(text)
+        except Exception as e:      # noqa: BLE001
+            self.msg.setText(str(e))
+            return
+        self.msg.setStyleSheet("color:#555;")
+        self.msg.setText("正在验证…")
+        self._sig = _UiSignal()
+        self._sig.fn.connect(self._run_ui)
+
+        def worker():
+            ok = self.client.is_logged_in(force=True)
+            self._sig.fn.emit(lambda: self._done(ok))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _run_ui(self, fn) -> None:
+        try:
+            fn()
+        except Exception:
+            pass
+
+    def _done(self, ok: bool) -> None:
+        if ok:
+            self.accept()
+        else:
+            self.msg.setStyleSheet("color:#b3261e;")
+            self.msg.setText("Cookie 无效或已过期。")
+
+
 class MainWindow(QMainWindow):
     """主窗口：左侧目录 + 右侧任务表（第一阶段只实现右侧）。"""
 
@@ -672,8 +918,11 @@ class MainWindow(QMainWindow):
         lay.addStretch(1)
         self.btn_manual = QPushButton("手动搜索…")
         self.btn_settings = QPushButton("设置…")
+        self.btn_login = QPushButton("登录 115…")
+        lay.addWidget(self.btn_login)
         lay.addWidget(self.btn_manual)
         lay.addWidget(self.btn_settings)
+        self.btn_login.clicked.connect(self.open_login)
         self.btn_settings.clicked.connect(self.open_settings)
         self.btn_manual.clicked.connect(self.open_manual_search)
         self.lbl_mode = QLabel("模式：未连接")
@@ -682,6 +931,17 @@ class MainWindow(QMainWindow):
 
     def open_settings(self) -> None:
         SettingsDialog(self, self.app).exec()
+
+    def open_login(self) -> None:
+        """115 登录：优先扫码，也可改用 Cookie。"""
+        client = getattr(self.app, "client", None)
+        if client is None:
+            QMessageBox.information(
+                self, "登录 115",
+                "尚未创建客户端连接。\n"
+                "请检查网络或先用默认界面完成登录。")
+            return
+        LoginDialog(self, self.app, client).exec()
 
     def open_manual_search(self) -> None:
         """手动搜索：先选任务，再按关键词搜各来源。"""
