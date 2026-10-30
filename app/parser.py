@@ -45,6 +45,11 @@ RE_EP_DASH = re.compile(
     r"(?=$|[\s._\[\]()]|\.[A-Za-z0-9]{2,4}$)")
 RE_EP_TRAIL = re.compile(
     r"(?:^|[\s._])(\d{1,4})(?:v\d+)?(?:\s*[-~]\s*(\d{1,4}))?\s*$")
+# 中文片名紧跟集号、中间没有分隔符：「将夜01」「犬夜叉03」
+# 只认紧贴在汉字/假名后面的数字，且必须是整个名字的结尾，
+# 避免把「1984」「琅琊榜2」这类含数字的片名误判成集号。
+RE_EP_CJK_TAIL = re.compile(
+    r"(?<=[\u4e00-\u9fff\u3040-\u30ff])(\d{1,4})(?:v\d+)?\s*$")
 RE_YEAR = re.compile(r"(?<!\d)(19\d{2}|20\d{2})(?!\d)")
 RE_RESOLUTION = re.compile(r"(?i)(?<!\d)\d{3,4}\s*[x×]\s*\d{3,4}(?!\d)")
 RE_RELEASE_NOISE = re.compile(
@@ -453,6 +458,24 @@ def parse_name(raw: str, is_dir: bool = False,
                 ep_match = m
                 break
             if ep_match:
+                break
+        if ep_match is None and not is_dir:
+            # 「将夜01」这类中文片名紧贴集号的写法（无分隔符）
+            for m in RE_EP_CJK_TAIL.finditer(work):
+                num = int(m.group(1))
+                if 1900 <= num <= 2099 or overlaps_season(m):
+                    continue
+                if _is_part_number(work, m) or _is_audio_channel(work, m):
+                    continue
+                head = work[:m.start()].strip()
+                if len(head) < 2:
+                    continue
+                # 一位数字（琅琊榜2）和 00（高达00）多半是片名的一部分，
+                # 只有两位以上且非全零的数字才当作集号。
+                raw = m.group(1)
+                if len(raw) < 2 or num == 0:
+                    continue
+                ep_match = m
                 break
         if ep_match is None and not is_dir:
             for m in RE_EP_TRAIL.finditer(work):
