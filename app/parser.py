@@ -435,6 +435,20 @@ def parse_name(raw: str, is_dir: bool = False,
             season_span = m.span()
             roman_season = bool(season and not raw.isdigit() and
                                 cn_number(raw) is None)
+            # 「庆余年 第2季…Joy.of.Life.2.S02.1080p」：中文季号已经把
+            # season 定下来，但英文的 S02 / Season 2 还留在标题里，
+            # 结果片名成了「庆余年 Joy.of.Life.2.S02」，输出时英文名
+            # 就重复了。这里把同义的英文季号一并从标题里去掉。
+            for extra in (RE_SEASON_S, RE_SEASON_EN):
+                for em in extra.finditer(work):
+                    if em.start() == m.start():
+                        continue
+                    try:
+                        if int(em.group(1)) != season:
+                            continue
+                    except (TypeError, ValueError):
+                        continue
+                    spans.append(em.span())
         # 目录名「将夜II」「将夜 II Ever Night」：中文片名紧跟罗马数字，
         # 该数字就是季号（中文名后面几乎不会是 Rocky II 那种序号）。
         # 即使已经从 S02 得到季号，也要把「II」从标题里去掉，
