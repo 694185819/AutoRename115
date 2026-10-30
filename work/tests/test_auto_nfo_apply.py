@@ -53,7 +53,10 @@ def make_plan(client, fid, title="电影"):
 
 
 def main():
-    app = App(BASE)
+    # 用临时目录：避免读到用户真实的 data/settings.json，
+    # 也避免把测试产生的设置写回去（之前就因此污染过别的测试）。
+    import tempfile as _tf
+    app = App(_tf.mkdtemp(prefix="arn115_nfo_"))
     app.withdraw()
     app.undo.record = lambda *a, **k: None
     app._save_settings = lambda: None
@@ -88,7 +91,12 @@ def main():
 
     app._save_nfo_batch = fake_batch
     app.apply_selected()
-    pump(app, 15)
+    # 等这一次 apply 彻底结束：文件已改名 + 任务已清空 + busy 复位。
+    # 只等 busy 会有竞态（NFO 阶段会重新置 busy），导致下一次
+    # apply_selected 被“有任务在执行”挡掉。
+    pump(app, 20, until=lambda: (
+        client._items[fid].name == "电影 (2020) [tmdbid-123].mkv"
+        and not app.plans and not app.busy))
     assert client._items[fid].name == "电影 (2020) [tmdbid-123].mkv", \
         client._items[fid].name
     assert calls == [p], calls
@@ -112,11 +120,9 @@ def main():
 
     app._save_nfo_batch = boom
     app.apply_selected()
-    # 等两件事都完成：文件已改名 + 失败提示已出现。
-    # 只等 busy 变 False 不够稳（后台线程和主循环交错），
-    # 这台机器负载高时会出现偶发失败。
+    # 等三件事都完成：文件已改名 + 失败提示已出现 + busy 复位
     pump(app, 30, until=lambda: (client._items[fid2].name.startswith(
-        "电影2 (2020)")) and bool(warnings))
+        "电影2 (2020)")) and bool(warnings) and not app.busy)
     assert client._items[fid2].name.startswith("电影2 (2020)"), \
         client._items[fid2].name
     assert warnings and "自动保存 NFO/图片失败" in warnings[-1], warnings

@@ -499,6 +499,17 @@ def _parallel_aliases(text: str) -> list[str]:
     return [g.strip() for g in groups if g.strip()]
 
 
+# 从文件名里抽英文名时要跳过的规格/来源词
+_LOCAL_EN_STOPWORDS = {
+    "web", "dl", "webdl", "webrip", "bluray", "blu", "ray", "bd", "remux",
+    "hdtv", "dvdrip", "hdrip", "x264", "x265", "h264", "h265", "hevc",
+    "avc", "aac", "ac3", "dts", "flac", "ddp", "truehd", "atmos",
+    "mkv", "mp4", "avi", "ts", "m2ts", "srt", "ass", "sup",
+    "repack", "proper", "dual", "multi", "chs", "cht", "gb", "big5",
+    "fhd", "uhd", "hdr", "dovi", "dv", "sdr", "qhd", "hd",
+}
+
+
 def _usable_query(q: str) -> bool:
     """能拿去搜元数据的词。
 
@@ -2660,7 +2671,9 @@ class Planner:
         if source == "none":
             return ""
         if source == "local":
-            return self._english_title(plan)
+            name = self._english_title(plan)
+            # 联网拿不到英文名时，退回文件名/文件夹里能看到的英文名
+            return name or self._english_from_local(plan)
         cand = {
             "imdb": plan.match.imdb,
             "tmdb": plan.match.tmdb,
@@ -2687,14 +2700,64 @@ class Planner:
         foreign = [str(x) for x in raw_names if x and not is_cjk(str(x))]
         rest = [str(x) for x in raw_names if x]
         for raw in foreign + rest:
-            c = sanitize_name(str(raw or ""), 120)
-            if not c or norm_title(c) == norm_title(plan.title):
+            # 剥掉“第二季/Season 2”这类季号后缀：
+            # 豆瓣条目常叫「将夜 第二季」，直接当来源名会出现
+            # 「将夜.将夜.第二季」两段中文。
+            stripped = strip_season_markers(str(raw or ""))
+            for candidate in (stripped, str(raw or "")):
+                c = sanitize_name(candidate, 120)
+                if not c or norm_title(c) == norm_title(plan.title):
+                    continue
+                if self._looks_like_release_tag(c):
+                    continue
+                # 来源名那一段不要中文：中文主名称已经在前面，
+                # 再来一段中文就成了「将夜.将夜」。
+                if is_cjk(c) and not re.search(r"[A-Za-z]{2,}", c):
+                    continue
+                return c
+        # 该来源没有可用外文名：回退到英文名推断
+        fallback = self._english_title(plan)
+        if fallback:
+            return fallback
+        # 连 IMDb/TMDB 都没有时，从原文件名/目录里抽英文名：
+        # 「将夜II.Ever.Night.S02E01…」里就有 Ever Night。
+        return self._english_from_local(plan)
+
+    def _english_from_local(self, plan: PlanItem) -> str:
+        """从原文件名或文件夹名里抽一段英文名（兜底用）。
+
+        用户常见情况：文件名是「将夜II.Ever.Night.S02E01.2160p…」，
+        但 IMDb/TMDB 都没匹配到。此时“来源名”那一段应该退回到
+        本地可见的 Ever Night，而不是整段消失。
+        """
+        mr = plan.context.get("mr")
+        seeds: list[str] = []
+        for e in (plan.context.get("entries") or []):
+            if getattr(e, "is_video", False):
+                seeds.append(getattr(e.item, "stem", "") or "")
+        if mr is not None:
+            seeds.append(getattr(mr.item, "name", "") or "")
+            seeds.extend(getattr(mr.item, "ancestors", None) or [])
+        for text in seeds:
+            if not text:
                 continue
-            if self._looks_like_release_tag(c):
-                continue
-            return c
-        # 该来源没有可用名字：回退到原有推断，避免“整段凭空消失”
-        return self._english_title(plan)
+            # 按分隔符切段，挑出连续的“纯英文字母”段拼成名字：
+            # 「将夜II.Ever.Night.S02E01.2160p…」→ Ever Night
+            parts = re.split(r"[.\s_\-\[\]()【】]+", text)
+            run: list[str] = []
+            best: list[str] = []
+            for part in parts + [""]:
+                if re.fullmatch(r"[A-Za-z][A-Za-z']*", part or "") and \
+                        part.lower() not in _LOCAL_EN_STOPWORDS:
+                    run.append(part)
+                    continue
+                if len(" ".join(run)) > len(" ".join(best)):
+                    best = run
+                run = []
+            name = " ".join(best).strip()
+            if len(name) >= 3:
+                return sanitize_name(name, 120)
+        return ""
 
     def _english_title(self, plan: PlanItem) -> str:
         """取英文名（用于 中文名.英文名.SxxExx 这种文件命名）。"""
