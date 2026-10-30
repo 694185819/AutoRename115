@@ -3068,7 +3068,16 @@ class Planner:
         jp_rule_off = style == "none"
         english_part = ""
         if plan.media_type == "series" and (not is_jp_series or jp_rule_off):
-            en = self._english_title(plan)
+            # 文件夹里的英文段跟「命名规则 → 主名称」下拉保持一致：
+            # 选「不显示」就不写英文名，选哪个来源就用那个来源的名字。
+            name_src = str(getattr(self.options, "name_segment_source",
+                                   "imdb") or "imdb")
+            if name_src == "none":
+                en = ""
+            elif name_src in ("imdb", "tmdb", "douban", "bangumi"):
+                en = self._name_segment(plan) or ""
+            else:
+                en = self._english_title(plan)
             # IMDb 对国产剧常只给拼音（Wan Chun Dou Xiao She），
             # 而原文件名里写着真英文名（Amusing Club of Wanchun）。
             # 拼音让位给本地可见的真英文名。
@@ -3076,7 +3085,7 @@ class Planner:
             if local_en and en and _is_pinyin_of(en, title) and \
                     not _is_pinyin_of(local_en, title):
                 en = local_en
-            elif local_en and not en:
+            elif local_en and not en and name_src != "none":
                 en = local_en
             # “What If...?”这类风格标题，文件夹里保留 What If 即可；
             # 英文名里的冒号统一换成空格，避免出现“Avatar： The...”
@@ -3637,10 +3646,19 @@ class Planner:
                     title, season, ep, ext=ext,
                     name_segment=english_title, subtitle=subtitle,
                     specs=specs, ep_end=ep_end, version=version)
-            else:
+            elif category == "jp_anime" and \
+                    str(getattr(self.options, "jp_folder_style", "")) != "none":
                 # 日番保留简洁命名；同集多文件时仍加 v2，避免同名冲突。
                 new_name = _episode_name(video_title, season, ep, ep_end,
                                          ext, specs, subtitle, version)
+            else:
+                # 日番选了「不使用」时按普通规则命名：
+                # 来源名、副标题、规格都跟其它剧集一样由「命名规则」决定，
+                # 而不是继续用日番的简洁格式把英文名丢掉。
+                new_name = naming_rule.build_episode_filename(
+                    title, season, ep, ext=ext,
+                    name_segment=english_title, subtitle=subtitle,
+                    specs=specs, ep_end=ep_end, version=version)
             old_stem = e.item.stem
             new_stem = new_name[:-len(ext)] if ext else new_name
             video_map.append((e, old_stem, new_stem))
