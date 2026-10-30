@@ -2778,8 +2778,11 @@ class Planner:
         # 原目录是“中文名 + 英文名”的，保留英文名，三季统一：
         # 假如...? What If...? S01 (2021) [tmdbid-...]
         # 文件夹固定顺序：中文名 英文名 Sxx (年份) [ID]
+        # 日番选了“不使用”（style == "none"）时，也按普通剧集规则处理，
+        # 包括保留英文名。
+        jp_rule_off = style == "none"
         english_part = ""
-        if plan.media_type == "series" and not is_jp_series:
+        if plan.media_type == "series" and (not is_jp_series or jp_rule_off):
             en = self._english_title(plan)
             # “What If...?”这类风格标题，文件夹里保留 What If 即可；
             # 英文名里的冒号统一换成空格，避免出现“Avatar： The...”
@@ -3080,9 +3083,11 @@ class Planner:
         # 日番本来就从简，保持不写。
         want_specs = category in SPEC_CATEGORIES and bool(
             getattr(self.options, "include_specs", True))
-        # 日番视频名用日文；没有日文时用罗马音/英文名，最后才中文
+        # 日番视频名用日文；没有日文时用罗马音/英文名，最后才中文。
+        # 日番选了“不使用”时，文件名也按普通规则（用中文标题）。
+        jp_rule_off = str(getattr(self.options, "jp_folder_style", "")) == "none"
         video_title = title
-        if category == "jp_anime":
+        if category == "jp_anime" and not jp_rule_off:
             video_title = sanitize_name(
                 self._video_title(plan) or title, 220)
 

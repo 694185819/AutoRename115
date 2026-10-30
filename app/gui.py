@@ -76,6 +76,8 @@ DOUBAN_COOKIE_TEMPLATE = (
 JP_FOLDER_LABELS = {
     "standard": "标准：中文名 (年份) [ID]",
     "bdremux": "[BD-REMUX]中文名 日文名 (年份) [ID]",
+    # 不使用专门的日番规则：识别为日番时也按普通剧集规则命名
+    "none": "不使用（日番按普通规则命名）",
 }
 JP_LABEL_TO_KEY = {v: k for k, v in JP_FOLDER_LABELS.items()}
 

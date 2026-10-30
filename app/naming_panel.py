@@ -48,6 +48,8 @@ EXAMPLE_SUBTITLES = {
 JP_FOLDER_OPTIONS = {
     "bdremux": "[BD-REMUX]中文名 日文名 (年份) [ID]",
     "standard": "标准：中文名 (年份) [ID]",
+    # 不使用专门的日番规则：识别为日番时也按普通剧集规则命名
+    "none": "不使用（日番按普通规则命名）",
 }
 
 # 电影命名：目前只有这一种写法
