@@ -2991,24 +2991,13 @@ class Planner:
         return main or plan.title
 
     def _folder_season_marker(self, plan: PlanItem) -> str:
-        """季目录根任务在剧名后加 S01/S02，中文名也能一眼分清。"""
-        if plan.media_type != "series" or len(plan.seasons) != 1:
-            return ""
-        season = plan.seasons[0]
-        if season is None:
-            return ""
-        mr: MediaRoot = plan.context.get("mr")
-        if mr is None:
-            return ""
-        # 原目录带季标记，或它是从合集目录里发现的独立季目录时加 Sxx：
-        # 整部剧根目录（含多个季子目录）保持“剧名 (年份) [ID]”。
-        if season_from_text(mr.item.name) is None and \
-                not mr.is_season_root:
-            return ""
-        if re.search(rf"(?i)(?:^|[\s._-])S0?{season}(?!\d)",
-                     plan.display_title or ""):
-            return ""
-        return f" S{season:02d}"
+        """文件夹名是否追加 S01/S02。
+
+        按用户要求：文件夹统一为「剧名 (年份) [ID]」，不再带 Sxx。
+        原目录名里即使写着 S01（如「大理寺少卿游 White Cat Legend S01」），
+        也一并去掉，保证整部剧名字规范一致。
+        """
+        return ""
 
     @staticmethod
     def _existing_folder_version(name: str) -> int:

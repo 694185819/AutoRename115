@@ -108,8 +108,9 @@ def main():
     s2p = next(p for p in series if p.seasons == [2])
     show1 = next(o.new_name for o in s1p.ops if o.role == "show")
     show2 = next(o.new_name for o in s2p.ops if o.role == "show")
-    assert " S01 " in show1, show1
-    assert " S02 " in show2, show2
+    # 用户要求：文件夹统一为「剧名 (年份) [ID]」，不再带 Sxx
+    assert " S01" not in show1 and " S02" not in show1, show1
+    assert " S02" not in show2 and " S01" not in show2, show2
     assert any("S01E01" in o.new_name for o in s1p.ops
                if o.role == "episode")
     assert any("S02E01" in o.new_name for o in s2p.ops

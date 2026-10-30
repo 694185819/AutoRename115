@@ -48,7 +48,7 @@ def main():
     plan = planner.analyze(FakeClient(tree), [root])[0]
     show = next(o for o in plan.ops if o.role == "show")
     assert show.new_name == \
-        "降世神通：最后的气宗 Avatar The Last Airbender S02 (2005) " \
+        "降世神通：最后的气宗 Avatar The Last Airbender (2005) " \
         "[imdbid-tt0417299]", show.new_name
 
     # 整部剧根目录（内含多个季子目录）：保持不带 S01
@@ -77,7 +77,7 @@ def main():
     plan = planner.analyze(FakeClient(tree), [root])[0]
     show = next(o for o in plan.ops if o.role == "show")
     assert show.new_name == \
-        "降世神通：最后的气宗 Avatar The Last Airbender S02 (2005) " \
+        "降世神通：最后的气宗 Avatar The Last Airbender (2005) " \
         "[imdbid-tt0417299]", show.new_name
 
     print("SEASON FOLDER NAMES OK")
