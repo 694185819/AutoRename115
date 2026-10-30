@@ -2803,9 +2803,11 @@ class Planner:
           回退到原有的英文名推断（IMDb/TMDB/本地），保持旧行为；
         - 选“不显示”则整段省略。
         """
-        source = str(getattr(self.options, "name_segment_source", "imdb")
-                     or "imdb").lower()
-        if source == "none":
+        # 注意：不能用 `or "imdb"`。设置被写成空串时要按“不显示”处理，
+        # 否则空值会被悄悄当成 imdb，英文名又冒出来。
+        raw = getattr(self.options, "name_segment_source", None)
+        source = "imdb" if raw is None else str(raw).strip().lower()
+        if source in ("", "none", "off", "no"):
             return ""
         if source == "local":
             name = self._english_title(plan)
@@ -3104,9 +3106,11 @@ class Planner:
         if plan.media_type == "series" and (not is_jp_series or jp_rule_off):
             # 文件夹里的英文段跟「命名规则 → 主名称」下拉保持一致：
             # 选「不显示」就不写英文名，选哪个来源就用那个来源的名字。
-            name_src = str(getattr(self.options, "name_segment_source",
-                                   "imdb") or "imdb")
-            if name_src == "none":
+            # 同样不能用 `or "imdb"`：空值要按「不显示」处理。
+            _raw_src = getattr(self.options, "name_segment_source", None)
+            name_src = ("imdb" if _raw_src is None
+                        else str(_raw_src).strip().lower())
+            if name_src in ("", "none", "off", "no"):
                 en = ""
             elif name_src in ("imdb", "tmdb", "douban", "bangumi"):
                 en = self._name_segment(plan) or ""
