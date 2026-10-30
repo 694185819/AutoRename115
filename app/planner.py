@@ -2668,14 +2668,25 @@ class Planner:
             "bangumi": plan.match.bangumi,
         }.get(source)
         ref = plan.match.ref(source)
-        names: list[str] = []
+        raw_names: list[str] = []
         if cand is not None:
-            names += [cand.original_title, cand.title]
+            raw_names += [cand.original_title, cand.title]
             if isinstance(cand.extra, dict):
-                names += list(cand.extra.get("aliases") or [])
-        if not names and ref:
-            names += [ref.get("original_title"), ref.get("title")]
-        for raw in names:
+                raw_names += list(cand.extra.get("aliases") or [])
+        if not raw_names and ref:
+            raw_names += [ref.get("original_title"), ref.get("title")]
+        # 「来源名」这一段要的是该来源的**原名/外文名**，
+        # 不是中文名：文件名结构是「中文主名称 . 来源名 . SxxExx」，
+        # 中文主名称已经由 plan.title 固定给出，这里再来一个中文名
+        # 会出现「将夜.长夜」这种重复。
+        # 因此优先取不含中文的名字（English/日文原名），
+        # 只有来源本身没有外文名时才退回中文名。
+        def is_cjk(s: str) -> bool:
+            return bool(re.search(r"[\u4e00-\u9fff]", s or ""))
+
+        foreign = [str(x) for x in raw_names if x and not is_cjk(str(x))]
+        rest = [str(x) for x in raw_names if x]
+        for raw in foreign + rest:
             c = sanitize_name(str(raw or ""), 120)
             if not c or norm_title(c) == norm_title(plan.title):
                 continue
@@ -2908,6 +2919,7 @@ class Planner:
         """命名来源及其条目号：("douban"/"bangumi"/"imdb"/"tmdb", sid)。
 
         返回 ("", "") 表示按自动匹配结果命名（维持原有行为）。
+        来源只取 plan.name_source（“按此来源命名”指定的任务级来源）。
         """
         source = str(getattr(plan, "name_source", "") or "")
         if source in EPISODE_NAME_SOURCES:
@@ -2917,6 +2929,33 @@ class Planner:
                 sid = self._fallback_source_id(plan, source)
             if sid:
                 return source, sid
+        return "", ""
+
+    def subtitle_ref(self, plan: PlanItem, name_source: str = "",
+                     name_sid: str = "") -> tuple[str, str]:
+        """副标题该用哪个来源：返回 (source, sid)，("", "") 表示不联网补。
+
+        由设置里的「副标题」下拉决定：
+          auto / name_source → 跟随“来源名”所用来源
+          imdb/tmdb/douban/bangumi → 指定来源
+          keyword → 只用原文件名里的标题，不联网
+        """
+        pref = str(getattr(self.options, "subtitle_source", "auto")
+                   or "auto")
+        if pref == "keyword":
+            return "", ""
+        if pref in ("auto", "name_source"):
+            if name_source and name_sid:
+                return name_source, name_sid
+            # 没有指定来源名：返回空，交给调用方走原来的自动流程
+            # （TMDB 分集接口），保证默认行为与以前完全一致。
+            return "", ""
+        if pref in EPISODE_NAME_SOURCES:
+            ref = plan.match.ref(pref)
+            sid = str((ref or {}).get("id") or "")
+            if not sid:
+                sid = self._fallback_source_id(plan, pref)
+            return (pref, sid) if sid else ("", "")
         return "", ""
 
     @staticmethod
@@ -2954,26 +2993,24 @@ class Planner:
                 if str(v or "").strip()}
 
     def _apply_naming_source(self, plan: PlanItem) -> None:
-        """把命名来源的标题/年份换成该来源自己的，并记录备注。
+        """换命名来源时，只换副标题等“来源相关”信息，不换中文主名称。
 
-        只换“命名依据”；分类（日番/电视剧/美漫…）仍由自动判断或人工选择
-        决定，避免换个来源就改变命名格式。
+        文件名结构是「中文主名称 . 来源名 . SxxExx . 副标题」：
+        - 中文主名称来自本地任务（plan.title），**必须固定**
+        - 来源名/副标题才跟随所选来源
+
+        以前这里会把 plan.title 换成来源自己的标题，导致选了
+        「TMDB 英文名」后整段变成 Ever.Night，中文名丢失。
         """
         source, sid = self.naming_ref(plan)
         if not source:
             return
         ref = plan.match.ref(source)
-        title = str(ref.get("title") or "").strip()
-        if title:
-            plan.title = sanitize_name(strip_season_markers(title), 220)
-        year = ref.get("year")
-        if isinstance(year, int) and year > 0:
-            plan.year = year
         label = {"douban": "豆瓣", "bangumi": "Bangumi",
                  "imdb": "IMDb", "tmdb": "TMDB"}.get(source, source)
         self._append_note(
             plan, f"命名来源：{label}（条目 {sid}）；"
-                  "标题、单集副标题与特别篇顺序按该来源。")
+                  "来源名、单集副标题按该来源，中文主名称保持不变。")
 
     @staticmethod
     def _special_texts(plan: PlanItem, entry: FileEntry) -> list[str]:
@@ -3287,6 +3324,9 @@ class Planner:
             seasons = sorted({s for _, s, ep, _, _ in resolved
                               if s is not None and ep is not None})
             source_empty = False
+            # 副标题用哪个来源：由设置里的「副标题」下拉决定
+            sub_source, sub_sid = self.subtitle_ref(
+                plan, name_source, name_sid)
             for s in seasons:
                 missing = any(
                     not self._episode_subtitle(e)
@@ -3294,11 +3334,15 @@ class Planner:
                     if ss == s and ep is not None)
                 if not missing:
                     continue
-                if name_source:
+                if str(getattr(self.options, "subtitle_source", "auto")
+                       or "auto") == "keyword":
+                    # 只用文件名里的标题，不联网补
+                    continue
+                if sub_source:
                     # 按所选来源取单集标题；该来源没有分集数据时留空，
                     # 绝不悄悄混入其他来源（尤其是 TMDB）的标题。
                     data = self._source_episode_titles(
-                        plan, s, name_source, name_sid)
+                        plan, s, sub_source, sub_sid)
                     if not data:
                         source_empty = True
                 else:
