@@ -1528,6 +1528,25 @@ class MetadataClient:
                 info = self.tmdb_detail(found["id"], found["kind"])
                 if info and not info.get("imdb_id"):
                     info["imdb_id"] = imdb_id
+        if not info and imdb_id:
+            # 没有 TMDB key 时，上面两条路都走不通，但 IMDb 自己就能
+            # 按编号给出标题/年份——否则「已有的 IMDb 编号」会被白白
+            # 丢掉，只能退回标题搜索（第一次分析因此拿不到 ID）。
+            try:
+                det = self.media_details("imdb", imdb_id, media_type)
+            except Exception:
+                det = {}
+            if det.get("title"):
+                info = {
+                    "title": det.get("title"),
+                    "original_title": det.get("original_title") or "",
+                    "year": det.get("year"),
+                    "imdb_id": imdb_id,
+                    "id": "",
+                    "country": det.get("country", ""),
+                    "animation": bool(det.get("animation")),
+                    "kind": kind,
+                }
         if not info:
             return None
         title = info.get("title") or fallback_title
@@ -1535,10 +1554,18 @@ class MetadataClient:
         year = info.get("year")
         imdb = info.get("imdb_id") or imdb_id or ""
         tmdb = info.get("id") or tmdb_id or ""
+        # 中文主名称不能被英文顶掉：IMDb 对国产剧只给 Go East，
+        # 本地目录却是「四方馆」，此时主标题继续用中文。
+        zh_title = title
+        if fallback_title and re.search(r"[\u4e00-\u9fff]", fallback_title) \
+                and not re.search(r"[\u4e00-\u9fff]", title or ""):
+            zh_title = fallback_title
+            if not original:
+                original = title
         res = MatchResult(
-            title_zh=title, title_original=original, year=year,
+            title_zh=zh_title, title_original=original or title, year=year,
             imdb_id=imdb, tmdb_id=tmdb,
-            series_title=title, series_original_title=original,
+            series_title=zh_title, series_original_title=original or title,
             series_year=year, series_imdb_id=imdb,
             country=info.get("country", ""),
             animation=bool(info.get("animation")), confidence=1.0)
@@ -1548,11 +1575,22 @@ class MetadataClient:
         if fallback_title and title and not strong_titles_agree(
                 title, fallback_title):
             if not (original and strong_titles_agree(original, fallback_title)):
-                # 旧目录里可能残留了别的剧/某季的 ID（例如 208452）。
-                # 这种 ID 不能当锚点，否则会把整部剧改成另一部片。
-                self.log(f"忽略与标题不一致的 ID：{tmdb or imdb} "
-                         f"({title}) ↔ {fallback_title}")
-                return None
+                # 一边是中文、另一边是纯外文（Go East ↔ 四方馆）时，
+                # 不是"不一致"，只是同一个条目的不同语言名。IMDb 对
+                # 国产剧常常只给英文名，若按不一致丢弃，目录里已有的
+                # ID 就白丢了，只能退回标题搜索。
+                cn_local = bool(re.search(r"[\u4e00-\u9fff]", fallback_title))
+                cn_title = bool(re.search(r"[\u4e00-\u9fff]", title))
+                if cn_local != cn_title:
+                    res.notes.append(
+                        f"编号 {tmdb or imdb} 的标题是「{title}」，"
+                        f"与本地「{fallback_title}」为同名不同语言，已采用。")
+                else:
+                    # 旧目录里可能残留了别的剧/某季的 ID（例如 208452）。
+                    # 这种 ID 不能当锚点，否则会把整部剧改成另一部片。
+                    self.log(f"忽略与标题不一致的 ID：{tmdb or imdb} "
+                             f"({title}) ↔ {fallback_title}")
+                    return None
         if tmdb:
             res.tmdb = Candidate(
                 source="tmdb", title=title, original_title=original,
