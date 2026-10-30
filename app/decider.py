@@ -104,6 +104,43 @@ def filter_by_movie_year(parsed: ParsedName, media_type: str,
             pools[name] = kept
 
 
+def _has_cjk(text: str) -> bool:
+    """是否含中文（用于判断“有没有中文名可用”）。"""
+    return bool(re.search(r"[\u4e00-\u9fff]", text or ""))
+
+
+def _chinese_title_for(parsed, best_db, best_bg, imdb_cand) -> str:
+    """主结果来自 IMDb 时，为“中文主名称”挑一个中文名。
+
+    IMDb 条目的 title 只有英文（Ever Night），直接拿来当主标题会让
+    文件名变成 Ever.Night.S01E01，中文名整段消失。按优先级取：
+      1. 本地片名（任务的文件夹/文件名，本来就是中文）
+      2. 豆瓣条目的中文名
+      3. Bangumi 条目的中文名
+      4. IMDb 条目自带的中文别名
+      5. 实在没有中文才用 IMDb 的英文名
+    """
+    local = str(getattr(parsed, "title", "") or "")
+    if _has_cjk(local):
+        return local
+    for cand in (best_db, best_bg):
+        if cand is None:
+            continue
+        for name in (cand.title, cand.original_title):
+            if name and _has_cjk(str(name)):
+                return str(name)
+    if imdb_cand is not None:
+        extra = getattr(imdb_cand, "extra", None)
+        if isinstance(extra, dict):
+            for name in (extra.get("aliases") or []):
+                if name and _has_cjk(str(name)):
+                    return str(name)
+        if imdb_cand.title and _has_cjk(str(imdb_cand.title)):
+            return str(imdb_cand.title)
+        return str(imdb_cand.title or local)
+    return local
+
+
 def _pick_one(pools: dict[str, list[Candidate]], media_type: str,
               picker,
               want_season: Optional[int] = None) -> tuple[
@@ -223,7 +260,11 @@ def decide(parsed: ParsedName, media_type: str, category: str,
     # 主标题
     if primary:
         if primary.source == "imdb":
-            res.title_zh = primary.title
+            # IMDb 条目的 title 只有英文，「中文主名称」不能因此变成
+            # Ever.Night。按优先级取中文名：
+            #   本地片名 → 豆瓣/Bangumi 的中文名 → IMDb 的别名 → 英文名
+            res.title_zh = _chinese_title_for(parsed, best_db, best_bg,
+                                              primary)
             res.title_original = primary.title
         else:
             res.title_zh = primary.title
@@ -242,7 +283,7 @@ def decide(parsed: ParsedName, media_type: str, category: str,
                 f"暂用「{primary.title}」（分段/季条目）；"
                 "主剧名会还原为不带分段的名字，请核对。")
     elif best_imdb:
-        res.title_zh = best_imdb.title
+        res.title_zh = _chinese_title_for(parsed, best_db, best_bg, best_imdb)
         res.title_original = best_imdb.title
     else:
         res.title_zh = parsed.title
