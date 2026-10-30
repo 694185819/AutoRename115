@@ -311,13 +311,21 @@ def _roman_is_season_marker(text: str, match) -> bool:
 
 
 def _strip_release_group(text: str) -> str:
-    """去掉结尾的 -Huan@HDsky / -HDSky 等发布组。"""
+    """去掉结尾的 -Huan@HDsky / -HDSky / -FLTTH 等发布组。"""
     m = RE_GROUP_SUFFIX.search(text)
     if not m:
         return text
     group = m.group(1)
     if "@" in group or group.casefold() in RELEASE_GROUPS:
         return text[:m.start()]
+    # 「2160p.WEB-DL.H264.AAC-FLTTH」这类：-XXXX 紧跟在规格词后面时，
+    # 基本可以确定是发布组，不管它是否在白名单里。
+    before = text[:m.start()]
+    if re.search(r"(?i)(?:[\.\s_-])(?:aac|ac3|eac3|dts|flac|ddp?|truehd|"
+                 r"atmos|opus|mp3|h26[45]|hevc|avc|x26[45]|2160p|1080p|"
+                 r"720p|480p|web-?dl|webrip|bluray|remux|hdtv|multi|"
+                 r"chs|cht|gb|big5)[\s._-]*$", before):
+        return before
     return text
 
 
@@ -427,6 +435,20 @@ def parse_name(raw: str, is_dir: bool = False,
             season_span = m.span()
             roman_season = bool(season and not raw.isdigit() and
                                 cn_number(raw) is None)
+        # 目录名「将夜II」「将夜 II Ever Night」：中文片名紧跟罗马数字，
+        # 该数字就是季号（中文名后面几乎不会是 Rocky II 那种序号）。
+        # 即使已经从 S02 得到季号，也要把「II」从标题里去掉，
+        # 否则会留下「将夜II Ever Night」这种片名。
+        m2 = re.search(
+            r"(?<=[\u4e00-\u9fff])\s*([IVX]{1,4})(?=$|[\s._\-])", work)
+        if m2:
+            val = roman_to_int(m2.group(1))
+            if val and val <= 20:
+                if season is None:
+                    season = val
+                    roman_season = True
+                    season_span = m2.span(1)
+                spans.append(m2.span(1))
         if season is None:
             # 标题后的裸罗马数字：Your Highness Ⅱ.2019.EP01-22
             # 必须同时有集数标记，避免误伤 Rocky II 这类电影名。
