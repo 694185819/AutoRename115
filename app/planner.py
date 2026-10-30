@@ -787,11 +787,27 @@ class Planner:
         if not season_dirs and not _is_generic_dir(dir_item.name):
             loose = [d for d in dirs if not is_season_dir(d.name) and
                      looks_like_season_dir(d.name)]
-            loose_titles = {
-                norm_title(parse_name(d.name, is_dir=True).title)
-                for d in loose}
-            loose_titles.discard("")
-            if loose and len(loose_titles) == 1:
+            loose_parsed = [parse_name(d.name, is_dir=True) for d in loose]
+            loose_titles = [p.title for p in loose_parsed if p.title]
+            # 剧名一致才当成同一部剧的季目录。
+            # 这里不能用“归一化后完全相同”来判：
+            #   「庆余年 第2季[…][国语音轨]Joy.of.Life.2.S02…」
+            #     → 解析成「庆余年 Joy.of.Life.2」
+            #   「庆余年.第1季.Joy.of.Life.S01.2019…」
+            #     → 解析成「庆余年」
+            # 两者写法不同但明显是同一部剧。改用两两 titles_agree
+            # 判定，中文名相同即视为同一部。
+            same_show = bool(loose_titles)
+            for i in range(len(loose_titles)):
+                for j in range(i + 1, len(loose_titles)):
+                    if not titles_agree(loose_titles[i], loose_titles[j]):
+                        same_show = False
+                        break
+                if not same_show:
+                    break
+            # 每个目录都必须真的带季号，否则不是“分季”结构
+            has_season = all(p.season is not None for p in loose_parsed)
+            if loose and same_show and has_season:
                 season_dirs = loose
         part_dirs = [d for d in dirs if is_part_dir(d.name)]
         subs_dirs = [d for d in dirs if is_subs_dir(d.name)]
