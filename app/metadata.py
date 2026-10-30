@@ -1963,10 +1963,29 @@ class MetadataClient:
         imdb_id = ids.get("imdb_id") or ""
         tmdb_id = ids.get("tmdb_id") or ""
         if imdb_id and not (res.imdb and res.imdb.sid == imdb_id):
+            # 光有编号不够：文件名里「来源名」那一段要的是该条目
+            # 自己的英文名（Ever Night）。这里按编号回查一次，
+            # 拿不到才退回豆瓣的名字。
+            title = res.imdb.title if res.imdb else ""
+            original = ""
+            year = res.imdb.year if res.imdb else db.year
+            if not title:
+                try:
+                    det = self.media_details("imdb", imdb_id,
+                                             "series" if media_type ==
+                                             "series" else "movie")
+                except Exception:
+                    det = {}
+                title = str(det.get("title") or "") or str(
+                    det.get("original_title") or "")
+                original = str(det.get("original_title") or "") or title
+                if det.get("year"):
+                    year = det.get("year")
+            if not title:
+                title = db.original_title or db.title or ""
             cand = Candidate(
-                source="imdb", title=(res.imdb.title if res.imdb else
-                                      (db.original_title or db.title)),
-                original_title="", year=res.imdb.year if res.imdb else db.year,
+                source="imdb", title=title,
+                original_title=original, year=year,
                 sid=imdb_id, kind="tv" if media_type == "series"
                 else "movie",
                 url=f"https://www.imdb.com/title/{imdb_id}/", extra={})
@@ -1976,10 +1995,24 @@ class MetadataClient:
             res.imdb = cand
             res.notes.append(f"IMDb 编号来自豆瓣关联：{imdb_id}")
         if tmdb_id and not (res.tmdb and res.tmdb.sid == tmdb_id):
+            title = res.tmdb.title if res.tmdb else ""
+            original = ""
+            year = res.tmdb.year if res.tmdb else db.year
+            if not title and self.tmdb_key:
+                try:
+                    det = self.media_details("tmdb", tmdb_id,
+                                             "series" if media_type ==
+                                             "series" else "movie")
+                except Exception:
+                    det = {}
+                title = str(det.get("title") or "") or str(
+                    det.get("original_title") or "")
+                original = str(det.get("original_title") or "") or title
+            if not title:
+                title = db.title or ""
             cand = Candidate(
-                source="tmdb", title=(res.tmdb.title if res.tmdb else
-                                      (db.title or "")),
-                original_title="", year=res.tmdb.year if res.tmdb else db.year,
+                source="tmdb", title=title,
+                original_title=original, year=year,
                 sid=tmdb_id, kind="tv" if media_type == "series"
                 else "movie",
                 url=f"https://www.themoviedb.org/tv/{tmdb_id}", extra={})

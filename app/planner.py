@@ -499,6 +499,22 @@ def _parallel_aliases(text: str) -> list[str]:
     return [g.strip() for g in groups if g.strip()]
 
 
+def _looks_like_tag_token(word: str) -> bool:
+    """英文片段是否只是标签/编号残片，不是片名的一部分。
+
+    片名里的单词通常首字母大写（Ever Night）或全大写缩写，
+    而 imdbid / tt9193596 / x264 这类标签几乎全小写、含数字。
+    """
+    w = (word or "").strip()
+    if not w:
+        return True
+    if w.islower():
+        # 全是小写：3 个字母以内的常见词（a/of/the）不算标签，
+        # 其余按标签处理，避免 imdbid、hdr10 之类混进片名
+        return len(w) > 3
+    return False
+
+
 # 从文件名里抽英文名时要跳过的规格/来源词
 _LOCAL_EN_STOPWORDS = {
     "web", "dl", "webdl", "webrip", "bluray", "blu", "ray", "bd", "remux",
@@ -507,6 +523,13 @@ _LOCAL_EN_STOPWORDS = {
     "mkv", "mp4", "avi", "ts", "m2ts", "srt", "ass", "sup",
     "repack", "proper", "dual", "multi", "chs", "cht", "gb", "big5",
     "fhd", "uhd", "hdr", "dovi", "dv", "sdr", "qhd", "hd",
+    # 目录名里的编号标记：「将夜 (2018)[imdbid-tt9193596]」
+    # 拆出来的 imdbid / tmdbid 不是英文名
+    "imdbid", "tmdbid", "tvdbid", "doubanid", "bgmid", "imdb", "tmdb",
+    "tvdb", "douban", "bangumi", "id",
+    # 字幕组/发布组占位，不是片名
+    "group", "sub", "subs", "raw", "rip", "encode", "encoded", "team",
+    "release", "aac", "10bit", "8bit", "hi10p", "v2", "v3", "amd", "nvenc",
 }
 
 
@@ -2741,14 +2764,18 @@ class Planner:
         for text in seeds:
             if not text:
                 continue
+            # 先去掉方括号内容：「[Group] 将夜 - 01 [1080p]」里的
+            # Group/1080p 都是标签，不是片名。
+            text = re.sub(r"[\[【(（][^\]】)）]*[\]】)）]", " ", text)
             # 按分隔符切段，挑出连续的“纯英文字母”段拼成名字：
             # 「将夜II.Ever.Night.S02E01.2160p…」→ Ever Night
-            parts = re.split(r"[.\s_\-\[\]()【】]+", text)
+            parts = re.split(r"[.\s_\-]+", text)
             run: list[str] = []
             best: list[str] = []
             for part in parts + [""]:
                 if re.fullmatch(r"[A-Za-z][A-Za-z']*", part or "") and \
-                        part.lower() not in _LOCAL_EN_STOPWORDS:
+                        part.lower() not in _LOCAL_EN_STOPWORDS and \
+                        not _looks_like_tag_token(part):
                     run.append(part)
                     continue
                 if len(" ".join(run)) > len(" ".join(best)):
