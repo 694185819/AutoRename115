@@ -43,6 +43,45 @@ from .textnorm import (  # noqa: E402  （放在常量之后，保持原文件�
     titles_agree,
 )
 
+# 中文里常被混用、且各站搜索不视为同一字的异体/形近字对。
+# 只放「互换后仍是同一部作品」的高频组合，避免引入无关结果。
+_CJK_SWAPS = [
+    ("记", "纪"), ("纪", "记"),
+    ("传", "伝"), ("伝", "传"),
+    ("战", "戰"), ("戰", "战"),
+    ("剑", "劍"), ("劍", "剑"),
+    ("游", "遊"), ("遊", "游"),
+    ("离", "離"), ("離", "离"),
+    ("东", "東"), ("東", "东"),
+]
+
+
+def _cjk_variants(text: str, limit: int = 6) -> list[str]:
+    """把常见异体/形近字逐字替换，生成候选搜索词。
+
+    例：东离剑游记 → 东离剑游纪 / 東离剑游记 / 東離劍遊紀 …
+    用于某站按原词搜不到（中文一字之差）时补搜一次。
+    """
+    base = str(text or "").strip()
+    if not base:
+        return []
+    out: list[str] = []
+    seen = {base}
+
+    def add(s: str) -> None:
+        if s and s not in seen and len(out) < limit:
+            seen.add(s)
+            out.append(s)
+
+    for src_ch, dst_ch in _CJK_SWAPS:
+        if src_ch in base:
+            add(base.replace(src_ch, dst_ch))
+    whole = base
+    for src_ch, dst_ch in _CJK_SWAPS:
+        whole = whole.replace(src_ch, dst_ch)
+    add(whole)
+    return out
+
 
 class MetadataClient:
     def __init__(self, cache_path: str,
@@ -1968,6 +2007,20 @@ class MetadataClient:
                 if not got and media_type == "movie":
                     got = self.search_tmdb(q, "series")
                 pools["tmdb"] += got
+            if not pools["tmdb"]:
+                # 中文名常有一字之差（东离剑游**记** vs TMDB 的
+                # 东离剑游**纪**）。按常见异体字替换后再搜一次，
+                # 这是可控、精准的修正，不会引入无关条目。
+                for q in queries[:1]:
+                    for variant in _cjk_variants(q):
+                        got = self.search_tmdb(variant, media_type)
+                        if not got and media_type == "movie":
+                            got = self.search_tmdb(variant, "series")
+                        if got:
+                            pools["tmdb"] += got
+                            break
+                    if pools["tmdb"]:
+                        break
 
         for c in bangumi_all + douban_all + imdb_all + pools["tmdb"]:
             c.score = self._score(parsed, c, media_type)
