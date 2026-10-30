@@ -68,8 +68,41 @@ DOUBAN_COOKIE_HINT = (
     "格式模板（直接照着填）："
     "dbcl2=这里填dbcl2的值; bid=这里填bid的值; ck=这里填ck的值"
 )
+import re
+
 DOUBAN_COOKIE_TEMPLATE = (
     "dbcl2=这里填dbcl2的值; bid=这里填bid的值; ck=这里填ck的值")
+
+
+def clean_douban_cookie(text: str) -> str:
+    """把输入框内容清洗成“可保存的 Cookie”。
+
+    输入框预置的是拼接模板（含「这里填dbcl2的值」这类占位符）。
+    如果用户没改就保存，绝不能把模板当成真值写进设置——
+    否则会把用户原先填好的真实 Cookie 覆盖掉，豆瓣功能直接失效。
+    """
+    t = str(text or "").strip()
+    if not t:
+        return ""
+    # 含占位符 → 视为“没填”，保存空串（保留原有值）
+    if "这里填" in t or ("这里" in t and "的值" in t):
+        return ""
+    return t
+
+
+def merge_settings_safely(old: dict, new: dict) -> dict:
+    """把新设置合并到旧设置上，但**空值不覆盖已有值**。
+
+    Cookie、TMDB Key 这类内容是用户手填的，一旦被清空很难自己发现；
+    而界面上“留空”往往只是表示“这次没改”。所以空串时保留旧值，
+    只有用户明确填了新内容才覆盖。
+    """
+    merged = dict(old or {})
+    for k, v in (new or {}).items():
+        if v in ("", None) and merged.get(k) not in ("", None):
+            continue          # 空值不覆盖已有的非空值
+        merged[k] = v
+    return merged
 # 日番文件夹格式：设置里只提供两种。历史上还有 bdremux_suffix /
 # bdremux_no_year 两种写法，planner 仍能识别，但不再出现在下拉框中；
 # 旧配置落到这里时按默认“你的风格”处理。
@@ -3840,7 +3873,9 @@ class App(tk.Tk):
         SettingsDialog(self)
 
     def apply_settings(self, new_settings: dict) -> None:
-        self.settings.update(new_settings)
+        # 空值不覆盖已有值：避免用户“没填/没改”时把已保存的
+        # Cookie、TMDB Key 清空。
+        self.settings = merge_settings_safely(self.settings, new_settings)
         self._save_settings()
         self._init_meta()
         # 主界面的命名规则面板跟随最新设置刷新
@@ -4492,6 +4527,15 @@ class SettingsDialog(tk.Toplevel):
         ttk.Label(frame, text="TMDB API Key（可选，填写后多一个数据源）").pack(anchor="w")
         self.tmdb_var = tk.StringVar(value=s.get("tmdb_key", ""))
         ttk.Entry(frame, textvariable=self.tmdb_var, width=60).pack(anchor="w", pady=3)
+        # 没填 key 时 TMDB 一栏必然是空的，这里直接说清楚，免得当成搜索出错
+        self.tmdb_state_label = ttk.Label(frame, text="", foreground="#b3261e")
+        self.tmdb_state_label.pack(anchor="w")
+        self._sync_tk_tmdb_state()
+        try:
+            self.tmdb_var.trace_add(
+                "write", lambda *a: self._sync_tk_tmdb_state())
+        except Exception:
+            pass
         api_link = ttk.Label(
             frame, text="获取 TMDB API Key（点击打开官网）",
             foreground="#0563c1", cursor="hand2",
@@ -4555,6 +4599,21 @@ class SettingsDialog(tk.Toplevel):
 
     def open_about(self) -> None:
         AboutDialog(self.app)
+
+    def _sync_tk_tmdb_state(self) -> None:
+        """提示 TMDB Key 是否已填：没填时 TMDB 来源必然为空。"""
+        lbl = getattr(self, "tmdb_state_label", None)
+        if lbl is None:
+            return
+        has = bool((self.tmdb_var.get() or "").strip())
+        if has:
+            lbl.configure(text="已填写 Key：保存后可查询 TMDB。",
+                          foreground="#176b33")
+        else:
+            lbl.configure(
+                text="未填写 Key：TMDB 来源将一直为空（手动搜索里 TMDB(0) "
+                     "就是这个原因）。不填也能正常使用 IMDb/豆瓣/Bangumi。",
+                foreground="#b3261e")
 
     def _open_tmdb_api(self, event=None) -> str:
         url = "https://www.themoviedb.org/settings/api"
@@ -4639,7 +4698,8 @@ class SettingsDialog(tk.Toplevel):
             "imdb_id_style": self.style_var.get(),
             "id_provider": self.provider_var.get(),
             "tmdb_key": self.tmdb_var.get().strip(),
-            "douban_cookie": self.douban_cookie_var.get().strip(),
+            "douban_cookie": clean_douban_cookie(
+                self.douban_cookie_var.get()),
             "login_app": self.login_app_var.get(),
             **(self.naming_panel.values() if self.naming_panel else {}),
         })

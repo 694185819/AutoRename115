@@ -30,6 +30,10 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication,
                                QVBoxLayout, QWidget)
 
 # 与 Tk 版共用同一套文案
+from .gui import (DOUBAN_COOKIE_TEMPLATE, clean_douban_cookie,
+                  merge_settings_safely)
+
+# 与 Tk 版共用同一套文案
 STATUS_LABELS = {
     "auto": "自动",
     "review": "需确认",
@@ -314,8 +318,7 @@ class SettingsDialog(QDialog):
         # 框里预置拼接模板，用户按提示把三项值填进去即可
         cookie_text = str(s.get("douban_cookie", "") or "")
         if not cookie_text:
-            from app.gui import DOUBAN_COOKIE_TEMPLATE as _T
-            cookie_text = _T
+            cookie_text = DOUBAN_COOKIE_TEMPLATE
         self.edit_cookie = QLineEdit(cookie_text)
         row.addWidget(self.edit_cookie, 1)
         btn_paste = QPushButton("从剪贴板粘贴")
@@ -366,14 +369,36 @@ class SettingsDialog(QDialog):
 
         # ---- TMDB
         box3 = QGroupBox("TMDB（可选）")
-        f3 = QHBoxLayout(box3)
+        f3v = QVBoxLayout(box3)
+        f3 = QHBoxLayout()
         self.edit_tmdb = QLineEdit(str(s.get("tmdb_key", "") or ""))
+        self.edit_tmdb.setPlaceholderText("粘贴 TMDB API Key（v3）")
         f3.addWidget(self.edit_tmdb, 1)
         btn_tmdb = QPushButton("获取 API Key…")
         btn_tmdb.clicked.connect(
             lambda: QDesktopServices.openUrl(
                 QUrl("https://www.themoviedb.org/settings/api")))
         f3.addWidget(btn_tmdb)
+        f3v.addLayout(f3)
+        # 明确告诉用户：没填 key 时 TMDB 一栏必然是空的（不是搜索出错）
+        self.lbl_tmdb_state = QLabel("")
+        self.lbl_tmdb_state.setWordWrap(True)
+        f3v.addWidget(self.lbl_tmdb_state)
+
+        def _sync_tmdb_state() -> None:
+            has = bool(self.edit_tmdb.text().strip())
+            if has:
+                self.lbl_tmdb_state.setText("已填写 Key：保存后可查询 TMDB。")
+                self.lbl_tmdb_state.setStyleSheet("color:#176b33;")
+            else:
+                self.lbl_tmdb_state.setText(
+                    "未填写 Key：TMDB 来源将一直为空（手动搜索里 TMDB(0) "
+                    "就是这个原因）。不填也能正常使用 IMDb/豆瓣/Bangumi。")
+                self.lbl_tmdb_state.setStyleSheet("color:#b3261e;")
+
+        self.edit_tmdb.textChanged.connect(
+            lambda _t: _sync_tmdb_state())
+        _sync_tmdb_state()
         lay.addWidget(box3)
 
         # ---- 其它
@@ -525,7 +550,7 @@ class SettingsDialog(QDialog):
             "rename_subtitles": self.chk_subtitles.isChecked(),
             "rename_season_folders": self.chk_season_dir.isChecked(),
             "use_bangumi": self.chk_bangumi.isChecked(),
-            "douban_cookie": self.edit_cookie.text().strip(),
+            "douban_cookie": clean_douban_cookie(self.edit_cookie.text()),
             "tmdb_key": self.edit_tmdb.text().strip(),
             "auto_check_updates": self.chk_auto_update.isChecked(),
             "remember_plans": self.chk_remember.isChecked(),
@@ -544,7 +569,12 @@ class SettingsDialog(QDialog):
             return
         object.__setattr__(app, "_settings_saving", True)
         try:
-            app.settings.update(values)
+            # 空值不覆盖已有值：用户“没改/没填”时不能把已保存的
+            # Cookie、TMDB Key 清空。
+            object.__setattr__(
+                app, "settings",
+                merge_settings_safely(object.__getattribute__(
+                    app, "settings"), values))
             fn = _opt(app, "_save_settings", None)
             if callable(fn):
                 fn()
@@ -1706,7 +1736,8 @@ class MainWindow(QMainWindow):
 def main(app_dir: str, demo: bool = False) -> int:
     """Qt 版启动入口。业务层暂时复用 Tk 版 App 的方法与状态。"""
     sys.path.insert(0, app_dir)
-    from app.gui import App          # 复用业务方法（不构建 Tk 界面）
+    from app.gui import (App, clean_douban_cookie as _clean_cookie,
+                       DOUBAN_COOKIE_TEMPLATE, merge_settings_safely)          # 复用业务方法（不构建 Tk 界面）
 
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
     qapp = QApplication.instance() or QApplication(sys.argv[:1])
