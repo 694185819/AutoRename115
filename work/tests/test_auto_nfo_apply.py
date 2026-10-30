@@ -21,13 +21,21 @@ gui.messagebox.showerror = lambda *a, **k: warnings.append(
     a[1] if len(a) > 1 else a)
 
 
-def pump(app, seconds=10):
+def pump(app, seconds=10, until=None):
+    """推进事件循环。给了 until 就等到条件成立（更稳，不受机器负载影响）。"""
     deadline = time.time() + seconds
     while time.time() < deadline:
         app.update()
-        if not app.busy:
-            return
+        if until is not None:
+            try:
+                if until():
+                    return True
+            except Exception:
+                pass
+        elif not app.busy:
+            return True
         time.sleep(0.05)
+    return False
 
 
 def make_plan(client, fid, title="电影"):
@@ -104,7 +112,11 @@ def main():
 
     app._save_nfo_batch = boom
     app.apply_selected()
-    pump(app, 15)
+    # 等两件事都完成：文件已改名 + 失败提示已出现。
+    # 只等 busy 变 False 不够稳（后台线程和主循环交错），
+    # 这台机器负载高时会出现偶发失败。
+    pump(app, 30, until=lambda: (client._items[fid2].name.startswith(
+        "电影2 (2020)")) and bool(warnings))
     assert client._items[fid2].name.startswith("电影2 (2020)"), \
         client._items[fid2].name
     assert warnings and "自动保存 NFO/图片失败" in warnings[-1], warnings

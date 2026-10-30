@@ -53,7 +53,11 @@ def main():
     p = Planner(meta, NamingOptions()).analyze(client, [show])[0]
     assert p.media_type == "series" and len(p.episodes) == 12
 
-    app = App(BASE)
+    # 用临时目录：避免测试把设置写进用户真实的 data/settings.json
+    # （之前就因此把 jp_folder_style 改成 none，导致断言失败）
+    import tempfile as _tf
+    app = App(_tf.mkdtemp(prefix="arn115_ms_"))
+    app.settings["jp_folder_style"] = "bdremux"
     app.withdraw()
     app.is_demo = True
     app.plans = [p]

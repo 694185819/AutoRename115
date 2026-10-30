@@ -152,6 +152,21 @@ def fmt_episodes(plan: PlanItem) -> str:
 
 
 class App(tk.Tk):
+    def __getattr__(self, name):
+        """安全兜底：缺失属性抛 AttributeError，而不是无限递归。
+
+        tkinter.Misc.__getattr__ 在取不到属性时会转去读 self.tk，
+        而 self.tk 同样不存在，于是无限递归直到 RecursionError
+        （报错就是 “maximum recursion depth exceeded”）。
+
+        getattr(app, "某个还没初始化的属性", 默认值) 是最常见的触发方式：
+        测试用 App.__new__ 造半成品实例、或界面在 __init__ 完成前读属性。
+
+        这里直接抛出 AttributeError，语义正确（getattr 会返回默认值），
+        也让 hasattr 正常工作。
+        """
+        raise AttributeError(name)
+
     def __init__(self, app_dir: str, demo: bool = False):
         super().__init__()
         self.app_dir = app_dir

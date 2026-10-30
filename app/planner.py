@@ -469,13 +469,40 @@ def _usable_query(q: str) -> bool:
     单个字（“剧”“番”“片”）和“电视剧/动画”这类容器名不是片名：
     拿“剧”去搜会把所有“剧场版/京剧猫”都当成 100% 匹配，
     这正是之前被匹配成宝可梦/城市猎人剧场版的原因。
+
+    带容量/集数/规格说明的片段（“125.93GB-61集全”“4K”“无水印”）
+    同样不是片名，拿去搜只会搜出一堆无关结果。
     """
     q = (q or "").strip()
     if not q or len(norm_title(q)) < 2:
         return False
     if _is_generic_dir(q):
         return False
-    return not _is_meaningless_title(q)
+    if _is_meaningless_title(q):
+        return False
+    return not _is_format_descriptor(q)
+
+
+# 容量/集数/规格说明：“125.93GB-61集全”“[4K]”“61集”“无水印”“HEVC-AAC”
+RE_FORMAT_DESC = re.compile(
+    r"(?i)(?:\d+(?:\.\d+)?\s*(?:gb|mb|tb)\b)"
+    r"|(?:\d+\s*集)"
+    r"|(?:全\s*\d+\s*集|共\s*\d+\s*集)"
+    r"|(?:[48]k|2160p|1080p|720p)"
+    r"|(?:无水印|无删减|完美版|珍藏版|高清版)"
+    r"|(?:h\.?26[45]|hevc|avc|x265|x264)"
+    r"|(?:aac|ac3|dts|flac|ddp?)")
+
+
+def _is_format_descriptor(text: str) -> bool:
+    """整段是否只是容量/集数/编码等格式说明（不含真正片名）。"""
+    t = (text or "").strip()
+    if not t:
+        return True
+    # 去掉格式说明后若几乎不剩什么（<=1 个字母/数字），就认为它没有片名
+    rest = RE_FORMAT_DESC.sub("", t)
+    rest = re.sub(r"[\[\]()【】\-_.\s]", "", rest)
+    return len(rest) < 2
 
 
 # “S1替换双语字幕”“S2-美版暂无日语字幕sup”里的后缀只是版本说明，
@@ -766,14 +793,20 @@ class Planner:
         return names
 
     def _context_parsed(self, mr: MediaRoot) -> ParsedName:
-        """当前文件夹名 + 上级文件夹名合并后的解析结果。
+        """确定这部作品的“片名来源”，只使用可信的名字。
 
-        当前目录如果是 “Season 01”“Disc1”“动画” 这类没有片名的目录，
-        就把片名/年份/季号从上级目录补回来。
+        按固定优先级，找到第一个可信的名字就停止，不再把更上层的目录名
+        混进搜索词（以前会把“仲夏夜之梦”“小狗三国之将星”这类
+        分类/合集名当成搜索词，搜出大量无关结果）：
 
-        搜索词必须带来源：只保留当前目录自己的词，以及“提供片名/与片名
-        一致”的上级目录的词。不能把 “其他布袋戏（全系列）”“布袋戏系列”
-        这类合集名，或无关季目录里的说明文字，一起丢给元数据搜索。
+        1. 当前目录名本身能解析出片名 → 用它；
+        2. 当前目录只是 S01 / 第几季 / 字幕 这类无意义名 → 往上一级找；
+        3. 逐级向上，直到遇到含片名的目录（通常就是作品目录）；
+        4. 更上层的目录（国家/类型/合集）**不再作为搜索词**，
+           只允许补充年份、季号这类结构化信息。
+
+        视频文件名在 `_context_entries` 里参与（文件名的片名优先级最高，
+        由 parse_name 从文件名解析，合并时不会覆盖已确定的片名）。
         """
         current_name = mr.item.name
         base = parse_name(current_name, is_dir=mr.item.is_dir,
@@ -799,23 +832,43 @@ class Planner:
         year = base.year
         season = base.season if base.season is not None else mr.root_season
 
+        # 已经拿到片名就不再向上找；只有“当前目录没有片名”时才逐级向上。
+        # 找到片名后立刻停止，避免把上级分类名当成搜索词。
         for name in self._ancestor_names(mr):
             ap = parse_name(name, is_dir=True)
             ap_title = ap.title if _usable_query(ap.title) else ""
             # 没有片名的合集/分区目录直接跳过，不能只拿它的年份/季号，
             # 更不能把它的名字混进搜索词。
             if not ap_title:
+                # 仍然允许这类目录补充年份/季号（它们是结构化信息，不是名字）
+                if year is None:
+                    year = ap.year
+                if season is None:
+                    season = ap.season
                 continue
             if not title:
+                # 当前目录没有片名：用这一级（通常是作品目录）的名字
                 title = ap_title
-            elif not titles_agree(ap_title, title):
-                # 与已选片名不一致的上级目录（例如 “其他布袋戏（全系列）”）
-                # 只可能是容器，不是这部作品的别名。
+                queries = [q.strip() for q in ap.queries
+                           if _usable_query(q)]
+                if year is None:
+                    year = ap.year
+                if season is None:
+                    season = ap.season
+                # 拿到片名即停止向上，上层是国家/类型等分类，不能再当搜索词
+                break
+            if titles_agree(ap_title, title):
+                # 与片名一致的上一级（例如作品目录的别名）补进搜索词
+                for q in ap.queries:
+                    q = q.strip()
+                    if _usable_query(q) and q not in queries:
+                        queries.append(q)
+                if year is None:
+                    year = ap.year
+                if season is None:
+                    season = ap.season
                 continue
-            for q in ap.queries:
-                q = q.strip()
-                if _usable_query(q) and q not in queries:
-                    queries.append(q)
+            # 与片名不一致：只可能是分类/合集，只补结构化信息
             if year is None:
                 year = ap.year
             if season is None:

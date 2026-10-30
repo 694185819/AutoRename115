@@ -551,11 +551,6 @@ class SettingsDialog(QDialog):
             init = _opt(app, "_init_meta", None)
             if callable(init):
                 init()
-        except RecursionError:
-            QMessageBox.warning(
-                self, "设置",
-                "保存时出现递归，请重启程序后再试。")
-            return
         except Exception as e:      # noqa: BLE001
             QMessageBox.warning(self, "设置", f"保存失败：{e}")
             return
