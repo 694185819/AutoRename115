@@ -3411,6 +3411,13 @@ class Planner:
         if category in DOTTED_CATEGORIES or category == "jp_anime":
             # “来源名”那一段：按设置里选的来源取（none 表示不显示）
             english_title = self._name_segment(plan)
+            # 来源名与主标题相同时不要再重复一遍：
+            # 手动选了 IMDb 条目时主标题可能已经是 Ever Night 2，
+            # 再拼一次来源名就成了 Ever.Night.2.Ever.Night。
+            if english_title and title and (
+                    norm_title(english_title) == norm_title(title) or
+                    norm_title(english_title) in norm_title(title)):
+                english_title = ""
             seasons = sorted({s for _, s, ep, _, _ in resolved
                               if s is not None and ep is not None})
             source_empty = False

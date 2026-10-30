@@ -3225,7 +3225,24 @@ class App(tk.Tk):
             tmdb_id = tmdb_id or old.tmdb_id
 
         m = MatchResult()
-        m.title_zh = cand.title or old.title_zh
+        # 中文主名称不能被英文顶掉：手动选 IMDb 条目时 cand.title 是
+        # 「Ever Night 2」，直接赋给 title_zh 会让整部剧变成英文名。
+        # 优先级：旧结果里的中文名（同一部剧时）→ 新条目自带中文名
+        # → 本地片名 → 英文名。
+        def _has_cjk(x: str) -> bool:
+            import re as _re
+            return bool(_re.search(r"[\u4e00-\u9fff]", x or ""))
+
+        new_title = (cand.title or "").strip()
+        old_cn = old.title_zh if _has_cjk(old.title_zh) else ""
+        if same_show and old_cn:
+            m.title_zh = old_cn
+        elif _has_cjk(new_title):
+            m.title_zh = new_title
+        elif _has_cjk(p.title or ""):
+            m.title_zh = p.title
+        else:
+            m.title_zh = new_title or old.title_zh
         m.title_original = cand.original_title or (
             old.title_original if same_show else "")
         m.year = cand.year
@@ -3257,7 +3274,17 @@ class App(tk.Tk):
                                original_title=str(ids.get("tmdb_original") or
                                                   tmdb_title),
                                year=cand.year, sid=tmdb_id)
-        m.series_title = base
+        # series_title 决定最终显示/命名的剧名，同样不能变成纯英文：
+        # 手动选 IMDb 条目时 base 是 Ever Night 2，而这部剧的中文名
+        # 是「将夜」，主标题必须继续用中文。
+        if _has_cjk(new_title):
+            m.series_title = new_title
+        elif _has_cjk(old.title_zh or "") and same_show:
+            m.series_title = old.title_zh
+        elif _has_cjk(p.title or ""):
+            m.series_title = p.title
+        else:
+            m.series_title = base
         m.series_year = year
         m.series_imdb_id = imdb_id if p.media_type == "series" else ""
         m.is_season_entry = bool(
@@ -3284,7 +3311,9 @@ class App(tk.Tk):
             m.notes.append("没有找到可写入的 IMDb/TMDB 标识，目录名会省略 ID。")
 
         p.match = m
-        p.title = base
+        # p.title 决定最终文件名的中文主名称：手动选 IMDb 条目时
+        # base 是英文（Ever Night 2），不能拿它覆盖中文剧名。
+        p.title = m.series_title if _has_cjk(m.series_title or "") else base
         p.year = year
         p.series_imdb_id = m.series_imdb_id
         p.confidence = 1.0
