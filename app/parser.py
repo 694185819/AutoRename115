@@ -311,21 +311,36 @@ def _roman_is_season_marker(text: str, match) -> bool:
 
 
 def _strip_release_group(text: str) -> str:
-    """去掉结尾的 -Huan@HDsky / -HDSky / -FLTTH 等发布组。"""
-    m = RE_GROUP_SUFFIX.search(text)
-    if not m:
-        return text
-    group = m.group(1)
-    if "@" in group or group.casefold() in RELEASE_GROUPS:
-        return text[:m.start()]
-    # 「2160p.WEB-DL.H264.AAC-FLTTH」这类：-XXXX 紧跟在规格词后面时，
-    # 基本可以确定是发布组，不管它是否在白名单里。
-    before = text[:m.start()]
-    if re.search(r"(?i)(?:[\.\s_-])(?:aac|ac3|eac3|dts|flac|ddp?|truehd|"
-                 r"atmos|opus|mp3|h26[45]|hevc|avc|x26[45]|2160p|1080p|"
-                 r"720p|480p|web-?dl|webrip|bluray|remux|hdtv|multi|"
-                 r"chs|cht|gb|big5)[\s._-]*$", before):
-        return before
+    """去掉结尾的 -Huan@HDsky / -HDSky / -FLTTH / -BlackTV 等发布组。"""
+    # 规格词被逐段剥掉后常留下「. . . . 」空点号，
+    # 于是结尾成了「. . . -BlackTV」。先把这些空壳收掉再匹配。
+    text = re.sub(r"(?:[\s.]+-\s*)+\s*$", "", text)
+    collapsed = re.sub(r"[\s.]{2,}", ".", text).strip(" .-_")
+    for candidate in (text, collapsed):
+        m = RE_GROUP_SUFFIX.search(candidate)
+        if m:
+            group = m.group(1)
+            if "@" in group or group.casefold() in RELEASE_GROUPS:
+                return candidate[:m.start()]
+            before = candidate[:m.start()]
+            # 把尾部剩下的分隔符去掉，并把 H.265 / H.264 这类写法归一
+            tail = re.sub(r"[\s._\-]+$", "", before)
+            tail = re.sub(r"(?i)h[._]?(26[45])", r"h\1", tail)
+            if re.search(
+                    r"(?i)(?:aac|ac3|eac3|dts|flac|ddp?|truehd|atmos|opus|"
+                    r"mp3|h26[45]|hevc|avc|x26[45]|2160p|1080p|720p|480p|"
+                    r"web-?dl|webrip|bluray|remux|hdtv|multi|dsnp|"
+                    r"chs|cht|gb|big5)$", tail):
+                return tail
+    # 兜底：末尾看起来像「空格 - 组名」且组名是纯字母，直接去掉
+    m2 = re.search(r"\s+-\s*([A-Za-z][A-Za-z0-9@_]{1,30})\s*$", text)
+    if m2 and re.search(r"(?i)(?:h26[45]|hevc|1080p|2160p|web|aac)", text):
+        return text[:m2.start()].strip(" .-_")
+    # 「x264@HDsky」「AAC@Group」：@ 前面是规格词时，@ 后面也是发布组
+    m3 = re.search(r"(?i)(x26[45]|h26[45]|aac|hevc)@([A-Za-z][A-Za-z0-9_]*)\s*$",
+                   text)
+    if m3:
+        return text[:m3.start()].strip(" .-_")
     return text
 
 
