@@ -781,6 +781,7 @@ class App(tk.Tk):
                                  command=self._on_info_source_pick)
             rb.pack(side="left", padx=(8, 0))
             self.info_radios[key] = rb
+        self._attach_info_hint(src_row)
         self.info_status = ttk.Label(src_row, text="", foreground="#777")
         self.info_status.pack(side="left", padx=10)
         # 命名来源：勾选后标题、单集副标题、特别篇顺序都按上面选中的来源取，
@@ -2230,15 +2231,168 @@ class App(tk.Tk):
             return sid, kind, ""
         return "", "tv", ""
 
+    def _attach_info_hint(self, parent) -> None:
+        """给资料来源行的每个单选加悬浮提示：再点一次会重新搜索。"""
+        tip = ("点击切换来源；再点一次已选中的来源会重新搜索一次"
+               "（某个来源为空时用它换一次请求）")
+
+        class _Tip:
+            def __init__(self, widget):
+                self.widget = widget
+                self.win = None
+
+            def show(self, _e=None):
+                if self.win is not None:
+                    return
+                try:
+                    x = self.widget.winfo_rootx()
+                    y = self.widget.winfo_rooty() + 24
+                    self.win = tk.Toplevel(self.widget)
+                    self.win.wm_overrideredirect(True)
+                    self.win.wm_geometry(f"+{x}+{y}")
+                    tk.Label(self.win, text=tip, justify="left",
+                             background="#ffffe0", relief="solid",
+                             borderwidth=1,
+                             font=("Microsoft YaHei UI", 9),
+                             wraplength=320).pack()
+                except Exception:      # noqa: BLE001
+                    self.win = None
+
+            def hide(self, _e=None):
+                if self.win is not None:
+                    try:
+                        self.win.destroy()
+                    except Exception:      # noqa: BLE001
+                        pass
+                    self.win = None
+
+        for rb in self.info_radios.values():
+            t = _Tip(rb)
+            rb.bind("<Enter>", t.show, add="+")
+            rb.bind("<Leave>", t.hide, add="+")
+
     def _on_info_source_pick(self) -> None:
-        """切换资料来源：若已勾选“按此来源命名”，命名来源跟着换。"""
+        """切换资料来源。
+
+        再次点击「已经选中」的来源时，对该来源重新搜索一次：
+        用户常常发现某个来源是空的（例如 TMDB 没有收录），
+        希望手动换关键词重搜，而不是被迫去右键菜单。
+        """
         p = self.detail_plan
-        if p is not None and self.name_by_source_var.get():
-            source = self.info_source_var.get()
+        if p is None:
+            return
+        source = self.info_source_var.get()
+        # 点的是当前已选中的来源 → 视为“刷新/重搜”
+        if source and source == getattr(self, "_last_info_source", None):
+            self._research_info_source(p, source)
+            return
+        self._last_info_source = source
+
+        if self.name_by_source_var.get():
             if source and p.name_source != source:
                 self._set_naming_source(p, source)
                 return
         self._load_info()
+
+    def _research_info_source(self, p: PlanItem, source: str) -> None:
+        """对指定来源重新搜一次（用当前任务的关键词）。"""
+        _, _, label = self._source_candidate_for(p, source)
+        self._log(f"重新搜索 {label}：{p.title}…")
+        if self.busy:
+            self._log("有任务在执行，稍后再试。")
+            return
+
+        def task():
+            try:
+                cand = self._fetch_source_candidate(p, source)
+            except Exception as e:      # noqa: BLE001
+                return f"搜索失败：{e}"
+            if cand is None:
+                return (f"{label} 仍无结果：该来源可能没有收录"
+                        f"《{p.title}》，可用右键「手动搜索」换关键词。")
+            return cand
+
+        def finish(payload) -> None:
+            self._set_busy(False)
+            if isinstance(payload, str):
+                self._log(payload)
+                self._load_info()
+                return
+            self._apply_manual_candidate(
+                p, payload, self.meta.resolve_ids(payload, p.media_type))
+            self._log(f"已从 {label} 取回：{payload.title}")
+            self._render_plans()
+
+        self.run_async(task, "research_source")
+        self._research_hook = finish
+
+    @staticmethod
+    def _source_candidate_for(p: PlanItem, source: str):
+        cand = {"douban": p.match.douban, "bangumi": p.match.bangumi,
+                "imdb": p.match.imdb, "tmdb": p.match.tmdb}.get(source)
+        label = {"douban": "豆瓣", "bangumi": "Bangumi",
+                 "imdb": "IMDb", "tmdb": "TMDB"}.get(source, source)
+        return cand, source, label
+
+    def _fetch_source_candidate(self, p: PlanItem, source: str):
+        """按任务的片名在指定来源搜一条最佳结果。
+
+        会依次尝试多个关键词，直到有结果：
+        片名 → 片名+年份 → 其它来源已拿到的标题/英文名 → 异体字变体。
+        TMDB 常只认英文名（「Thunderbolt Fantasy」能搜到，
+        「霹雳奇幻 生死一剑」搜不到），所以必须多试几个词。
+        """
+        from app.metadata import _cjk_variants
+        from app.models import ParsedName
+        query = p.title or p.parsed.title
+        parsed = ParsedName(raw=query, title=query, queries=[query],
+                            year=p.year, season=(p.seasons or [None])[0])
+        fn = {"douban": self.meta.search_douban,
+              "bangumi": self.meta.search_bangumi,
+              "imdb": self.meta.search_imdb,
+              "tmdb": lambda q: self.meta.search_tmdb(q, p.media_type),
+              }.get(source)
+        if fn is None:
+            return None
+
+        # 收集候选关键词：本任务已有的名字优先，其次变体
+        words: list[str] = [query]
+        if p.year:
+            words.append(f"{query} {p.year}")
+        for c in (p.match.imdb, p.match.tmdb, p.match.douban,
+                  p.match.bangumi):
+            if c is None:
+                continue
+            for w in (getattr(c, "original_title", ""),
+                      getattr(c, "title", "")):
+                if w:
+                    words.append(str(w))
+            if isinstance(c.extra, dict):
+                words += [str(a) for a in (c.extra.get("aliases") or [])]
+        words += _cjk_variants(query)
+
+        seen = set()
+        pool = []
+        for w in words:
+            w = w.strip()
+            if not w or w in seen:
+                continue
+            seen.add(w)
+            pool = fn(w) or []
+            # TMDB 的剧集/电影是分开收录的：任务判成剧集但条目其实是
+            # 电影（例如《东离剑游纪：生死一剑》是 movie）时会搜空。
+            # 查不到就换另一个类型再试一次。
+            if not pool and source == "tmdb":
+                other = "movie" if p.media_type != "movie" else "series"
+                pool = self.meta.search_tmdb(w, other) or []
+            if pool:
+                break
+        if not pool:
+            return None
+        for c in pool:
+            c.score = self.meta._score(parsed, c, p.media_type)
+        pool.sort(key=lambda c: c.score, reverse=True)
+        return pool[0]
 
     def _toggle_naming_source(self) -> None:
         """勾选/取消“按此来源命名”。"""
@@ -2494,6 +2648,7 @@ class App(tk.Tk):
         if not p:
             return
         source = self.info_source_var.get()
+        self._last_info_source = source
         sid, kind, fallback_poster = self._info_source_details(p, source)
         if not sid:
             self._clear_info()

@@ -2001,11 +2001,15 @@ class MetadataClient:
         if self.tmdb_key:
             for q in queries[:2]:
                 got = self.search_tmdb(q, media_type)
-                # 剧集目录名常没有季号（瓦舍江湖[全35集]…），会被判成
-                # 电影去搜；TMDB 里它却是 tv，movie 类型查不到。
-                # 电影查不到时补搜一次 tv，避免整部剧匹配不到。
-                if not got and media_type == "movie":
-                    got = self.search_tmdb(q, "series")
+                # TMDB 把剧集和电影分开收录，判断错类型就会搜空：
+                #  ● 剧集目录没有季号 → 判成 movie，其实是 tv
+                #    （瓦舍江湖[全35集]…）
+                #  ● 剧场版/特别篇判成 tv，其实是 movie
+                #    （东离剑游纪：生死一剑）
+                # 两种方向都要补搜一次。
+                if not got:
+                    other = "movie" if media_type != "movie" else "series"
+                    got = self.search_tmdb(q, other)
                 pools["tmdb"] += got
             if not pools["tmdb"]:
                 # 中文名常有一字之差（东离剑游**记** vs TMDB 的

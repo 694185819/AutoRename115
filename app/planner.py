@@ -3130,10 +3130,9 @@ class Planner:
             en = re.sub(r"(?:\.{2,}|…)\s*[?？]\s*$", "", en or "").strip()
             en = re.sub(r"[:：]", " ", en)
             en = re.sub(r"\s+", " ", en).strip()
-            # 主标题本身就带英文名（中文完整名称 + 国外原名一致）时，
-            # 不要再把英文名拼一遍。
-            if en and norm_title(en) != norm_title(title) \
-                    and not _mostly_same_words(en, title):
+            # 只有英文名与主标题完全相同才省掉，
+            # 部分重合（标题里已经带了同样的英文）时仍按用户选择输出。
+            if en and norm_title(en) != norm_title(title):
                 english_part = f" {en}"
         base = title + english_part + season_part
         if year:
@@ -3556,15 +3555,15 @@ class Planner:
         if category in DOTTED_CATEGORIES or category == "jp_anime":
             # “来源名”那一段：按设置里选的来源取（none 表示不显示）
             english_title = self._name_segment(plan)
-            # 来源名与主标题相同时不要再重复一遍：
-            # 手动选了 IMDb 条目时主标题可能已经是 Ever Night 2，
-            # 再拼一次来源名就成了 Ever.Night.2.Ever.Night。
-            # 中文完整名称本身就带英文、与国外原名一致的（如
-            # 「Thunderbolt Fantasy 東离剑游记」），同样不要再拼一遍。
-            if english_title and title and (
-                    norm_title(english_title) == norm_title(title) or
-                    norm_title(english_title) in norm_title(title) or
-                    _mostly_same_words(english_title, title)):
+            # 只有「来源名与主标题完全一样」时才省掉这一段，
+            # 避免 Ever.Night.2.Ever.Night 这种纯重复。
+            #
+            # 注意：不能用“包含/大致相同”来判。主标题本身带英文
+            # （如「Thunderbolt Fantasy 东离剑游记」）时，英文段
+            # 「Thunderbolt Fantasy」确实包含在标题里，但它仍是用户
+            # 明确选的「英文名段」，必须照常输出。
+            if english_title and title and \
+                    norm_title(english_title) == norm_title(title):
                 english_title = ""
             seasons = sorted({s for _, s, ep, _, _ in resolved
                               if s is not None and ep is not None})
