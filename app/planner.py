@@ -612,8 +612,37 @@ def _usable_query(q: str) -> bool:
         return False
     return not _is_format_descriptor(q)
 
+def _mostly_same_words(a: str, b: str) -> bool:
+    """两个名字是否「同一部作品的不同写法」。
 
-# 容量/集数/规格说明：“125.93GB-61集全”“[4K]”“61集”“无水印”“HEVC-AAC”
+    例：「Thunderbolt Fantasy 東离剑游记」与
+         「Thunderbolt Fantasy 東離劍遊紀」→ True
+    用于避免主标题里已经带了英文名时，来源名再拼一遍。
+
+    繁体/简体字无法逐字相等，所以比较方式：
+      - 英文单词（忽略大小写）有一半以上重合
+      - 中文部分长度接近（差 <= 2）
+    """
+    def en_words(t: str) -> set:
+        return set(w.lower() for w in re.findall(r"[A-Za-z]{3,}", t or ""))
+
+    def cjk_len(t: str) -> int:
+        return len(re.findall(r"[\u4e00-\u9fff]", t or ""))
+
+    we, wc = en_words(a), en_words(b)
+    if we and wc:
+        common = len(we & wc)
+        if common / max(len(we), len(wc)) < 0.5:
+            return False
+    elif bool(we) != bool(wc):
+        # 一个只有英文、一个只有中文 —— 不是“同写法重复”
+        return False
+    na, nb = cjk_len(a), cjk_len(b)
+    if na and nb and abs(na - nb) > 2:
+        return False
+    return bool(we or na)
+
+
 RE_FORMAT_DESC = re.compile(
     r"(?i)(?:\d+(?:\.\d+)?\s*(?:gb|mb|tb)\b)"
     r"|(?:\d+\s*集)"
@@ -3097,7 +3126,10 @@ class Planner:
             en = re.sub(r"(?:\.{2,}|…)\s*[?？]\s*$", "", en or "").strip()
             en = re.sub(r"[:：]", " ", en)
             en = re.sub(r"\s+", " ", en).strip()
-            if en and norm_title(en) != norm_title(title):
+            # 主标题本身就带英文名（中文完整名称 + 国外原名一致）时，
+            # 不要再把英文名拼一遍。
+            if en and norm_title(en) != norm_title(title) \
+                    and not _mostly_same_words(en, title):
                 english_part = f" {en}"
         base = title + english_part + season_part
         if year:
@@ -3523,9 +3555,12 @@ class Planner:
             # 来源名与主标题相同时不要再重复一遍：
             # 手动选了 IMDb 条目时主标题可能已经是 Ever Night 2，
             # 再拼一次来源名就成了 Ever.Night.2.Ever.Night。
+            # 中文完整名称本身就带英文、与国外原名一致的（如
+            # 「Thunderbolt Fantasy 東离剑游记」），同样不要再拼一遍。
             if english_title and title and (
                     norm_title(english_title) == norm_title(title) or
-                    norm_title(english_title) in norm_title(title)):
+                    norm_title(english_title) in norm_title(title) or
+                    _mostly_same_words(english_title, title)):
                 english_title = ""
             seasons = sorted({s for _, s, ep, _, _ in resolved
                               if s is not None and ep is not None})

@@ -152,6 +152,8 @@ class NamingRulePanel(ttk.LabelFrame):
                                            "title_year"),
                                    MOVIE_LABELS["title_year"]))
         self._build()
+        # 初始状态视为“已应用”，改动后才会出现提示
+        self._applied_snapshot = dict(self.values())
         self._refresh_preview()
 
     # ---------------- 界面
@@ -173,6 +175,10 @@ class NamingRulePanel(ttk.LabelFrame):
             values=list(SUBTITLE_LABELS.values()))
         self.sub_combo.pack(side="left")
         self.sub_combo.bind("<<ComboboxSelected>>", lambda e: self._refresh())
+
+        # 「规则改了但还没应用到任务」时明确提示，避免以为下拉没生效。
+        self.dirty_label = ttk.Label(self, text="", foreground="#b26a00")
+        self.dirty_label.pack(fill="x", anchor="w")
 
         # 第二行：规格开关 + 日番格式 + 电影（都放在同一行，省一层容器）
         second = ttk.Frame(self)
@@ -252,6 +258,36 @@ class NamingRulePanel(ttk.LabelFrame):
                  f"剧集：{sample}\n日番文件夹：{jp_example}\n"
                  f"电影：{movie_example}（目前只有这一种写法）")
         self._apply()
+        self._update_dirty_hint()
+
+    def _update_dirty_hint(self) -> None:
+        """下拉改动后提示「点按钮才会应用到任务」。
+
+        比较基准是「上次点按钮应用时的值」。只改草稿不算应用，
+        这样用户能看到自己选的还没落实到任务上。
+        """
+        lbl = getattr(self, "dirty_label", None)
+        if lbl is None:
+            return
+        applied = getattr(self, "_applied_snapshot", None) or {}
+        cur = self.values()
+        labels = {"name_segment_source": "英文名段",
+                  "subtitle_source": "副标题",
+                  "jp_folder_style": "日番格式",
+                  "include_specs": "规格"}
+        changed = [labels[k] for k in labels
+                   if k in applied and applied[k] != cur.get(k)]
+        if changed:
+            lbl.configure(
+                text=f"● 已改：{'、'.join(changed)}"
+                     " —— 点右下「保存为默认并重建当前任务」才会用到任务上")
+        else:
+            lbl.configure(text="")
+
+    def mark_applied(self) -> None:
+        """外部点了「保存为默认并重建」后调用，记录当前已应用的值。"""
+        self._applied_snapshot = dict(self.values())
+        self._update_dirty_hint()
 
     def _refresh(self) -> None:
         self._refresh_preview()

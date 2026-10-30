@@ -2358,6 +2358,12 @@ class App(tk.Tk):
         except Exception as e:      # noqa: BLE001
             self._log(f"保存命名规则失败：{e}")
         self._init_meta()
+        # 记下“已应用”的值，面板据此把「已改但未应用」的提示清掉
+        try:
+            if self.naming_panel is not None:
+                self.naming_panel.mark_applied()
+        except Exception:      # noqa: BLE001
+            pass
         plans = list(self.plans or [])
         if not plans:
             self._log("命名规则已保存；分析任务后即按新规则命名。")
