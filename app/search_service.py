@@ -89,7 +89,20 @@ def search_all(meta,
     else:
         notes.append("未配置 TMDB Key")
 
-    return sort_by_relevance(found, query, keywords, season, year), notes
+    ranked = sort_by_relevance(found, query, keywords, season, year)
+
+    # 方案 1：搜索阶段就为每个候选预取它自己的「英文名 / 分集名」，
+    # 双击选中后可立即套用，不用再等联网。
+    try:
+        from .prefetch import prefetch_for
+        top = [c for c in ranked if getattr(c, "sid", "")][:8]
+        done = prefetch_for(meta, top, media_type, season, say)
+        if done:
+            notes.append(f"已预取词句 {done} 条")
+    except Exception as e:      # noqa: BLE001
+        notes.append(f"预取词句失败：{e}")
+
+    return ranked, notes
 
 
 def sort_by_relevance(found: list, query: str,

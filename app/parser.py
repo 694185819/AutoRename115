@@ -326,11 +326,20 @@ def _strip_release_group(text: str) -> str:
             # 把尾部剩下的分隔符去掉，并把 H.265 / H.264 这类写法归一
             tail = re.sub(r"[\s._\-]+$", "", before)
             tail = re.sub(r"(?i)h[._]?(26[45])", r"h\1", tail)
-            if re.search(
-                    r"(?i)(?:aac|ac3|eac3|dts|flac|ddp?|truehd|atmos|opus|"
-                    r"mp3|h26[45]|hevc|avc|x26[45]|2160p|1080p|720p|480p|"
-                    r"web-?dl|webrip|bluray|remux|hdtv|multi|dsnp|"
-                    r"chs|cht|gb|big5)$", tail):
+            # DDP5.1 / DDP5 1 / AAC2.0 这类「编码+声道」组合也要认，
+            # 否则 -LelveTV 前面看着是「DDP5.1」就判不出规格词。
+            tail_norm = re.sub(r"(?i)(ddp|dd|ac3|eac3|aac|dts|truehd|flac)"
+                               r"[\s._]?[1-7][\s._]?[01]", r"\1",
+                               tail)
+            for probe in (tail, tail_norm):
+                if re.search(
+                        r"(?i)(?:aac|ac3|eac3|dts|flac|ddp?|truehd|atmos|"
+                        r"opus|mp3|h26[45]|hevc|avc|x26[45]|2160p|1080p|"
+                        r"720p|480p|web-?dl|webrip|bluray|remux|hdtv|multi|"
+                        r"dsnp|chs|cht|gb|big5)$", probe):
+                    return tail
+            # 末尾是「数字.数字」（60fps / 2.0 / 5.1）时也算规格尾部
+            if re.search(r"\d[\s._]\d$", tail):
                 return tail
     # 兜底：末尾看起来像「空格 - 组名」且组名是纯字母，直接去掉
     m2 = re.search(r"\s+-\s*([A-Za-z][A-Za-z0-9@_]{1,30})\s*$", text)

@@ -25,8 +25,17 @@ def main() -> None:
     h_short = detail.winfo_height()
 
     app._set_note(LONG)
-    for _ in range(10):
+    # 备注内容变长后需要等 Tk 重新布局：只 update 固定次数在机器繁忙时
+    # 可能还没排完，yview 会读成 (0.0, 1.0)。这里等到真正可滚动为止。
+    import time as _t
+    deadline = _t.time() + 8.0
+    last = 1.0
+    while _t.time() < deadline:
         app.update()
+        _first, last = app.note_label.yview()
+        if last < 1.0:
+            break
+        _t.sleep(0.05)
     h_long = detail.winfo_height()
     note_h = app.note_label.winfo_height()
     print(f"详情区 短备注={h_short}px | 长备注={h_long}px | 备注框={note_h}px")

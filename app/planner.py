@@ -621,7 +621,13 @@ RE_FORMAT_DESC = re.compile(
     r"|(?:[48]k|2160p|1080p|720p)"
     r"|(?:无水印|无删减|完美版|珍藏版|高清版)"
     r"|(?:h\.?26[45]|hevc|avc|x265|x264)"
-    r"|(?:aac|ac3|dts|flac|ddp?)")
+    r"|(?:aac|ac3|dts|flac|ddp?)"
+    # 帧率版本：「60帧率版本」「60帧」「60fps」
+    r"|(?:\d+\s*(?:帧率?|fps))"
+    r"|(?:版本|高码版|加长版|删减版)"
+    # 配音/字幕版本说明：「国语配音+中文字幕」
+    r"|(?:国语|粤语|日语|英语|国语版|中配)"
+    r"|(?:配音|中文字幕|中字|字幕|双语)")
 
 
 def _is_format_descriptor(text: str) -> bool:
@@ -2782,6 +2788,16 @@ class Planner:
             "douban": plan.match.douban,
             "bangumi": plan.match.bangumi,
         }.get(source)
+        # 方案 1：搜索阶段预取到的英文名优先使用（它属于该来源自己）
+        if cand is not None and isinstance(cand.extra, dict):
+            pre_en = str(cand.extra.get("english_title") or "").strip()
+            if pre_en:
+                c0 = sanitize_name(pre_en, 120)
+                if c0 and norm_title(c0) != norm_title(plan.title) \
+                        and not self._looks_like_release_tag(c0) \
+                        and not (is_cjk(c0) and not re.search(
+                            r"[A-Za-z]{2,}", c0)):
+                    return c0
         ref = plan.match.ref(source)
         raw_names: list[str] = []
         if cand is not None:

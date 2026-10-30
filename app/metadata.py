@@ -1775,8 +1775,48 @@ class MetadataClient:
         parsed = ParsedName(raw=cand.title, title=cand.title,
                             queries=queries or [cand.title], year=cand.year)
         if cand.source == "imdb" and cand.sid.startswith("tt"):
-            out["imdb_id"] = cand.sid
-            out["imdb_title"] = cand.title or cand.original_title
+            # 用户可能选中的是「单集」条目（IMDb 搜索结果里
+            # Episode #1.44 这种），它的编号不能当整部剧用：
+            # 会导致分集、年份、英文名全错。此时改用标题重新找主剧。
+            detail = {}
+            try:
+                detail = self.media_details("imdb", cand.sid, media_type)
+            except Exception:
+                detail = {}
+            ep_title = str((detail or {}).get("title") or "")
+            looks_episode = (ep_title.lower().startswith("episode")
+                             or "#" in ep_title)
+            if looks_episode:
+                self.log(f"IMDb {cand.sid} 是单集条目（{ep_title}），"
+                         "已改为按标题查找整部剧。")
+                # 用「去掉 Episode 字样」的候选标题去搜，不能用
+                # 「Episode #1.44」本身去搜（搜不到主剧）。
+                # 如果候选标题本身就没用，退回调用方给的片名。
+                clean_q = [q for q in queries
+                           if not str(q).lower().startswith("episode")
+                           and "#" not in str(q)]
+                if not clean_q:
+                    # 候选标题本身就是 Episode #1.44，没有可用词。
+                    # 退一步用中文/原始名（若调用方给过 aliases）。
+                    clean_q = [a for a in aliases
+                               if not str(a).lower().startswith("episode")
+                               and "#" not in str(a)]
+                pool: list[Candidate] = []
+                for q in (clean_q or queries)[:3]:
+                    pool += self.search_imdb(q)
+                for c in pool:
+                    c.score = self._score(parsed, c, media_type)
+                best = self._pick_imdb(pool, media_type, cand.year,
+                                       tuple(aliases))
+                if best:
+                    out["imdb_id"] = best.sid
+                    out["imdb_title"] = best.title or best.original_title
+                else:
+                    out["imdb_id"] = cand.sid
+                    out["imdb_title"] = cand.title or cand.original_title
+            else:
+                out["imdb_id"] = cand.sid
+                out["imdb_title"] = cand.title or cand.original_title
         else:
             pool: list[Candidate] = []
             for q in queries[:3]:
@@ -1798,6 +1838,16 @@ class MetadataClient:
             for c in pool:
                 c.score = self._score(parsed, c, media_type)
             best = self._pick_primary(pool, media_type)
+            if not best and pool:
+                # 中文条目用英文名搜索时，标题相似度会很低（青云志 vs
+                # The Legend of Chusen → 0.0），_pick_primary 直接判为
+                # 不合格。但 TMDB 的搜索结果本身是按相关度排的，
+                # 第一条就是这个条目；只要年份不冲突就采用。
+                top = pool[0]
+                year_ok = (not cand.year or not top.year or
+                           abs(int(cand.year) - int(top.year)) <= 2)
+                if year_ok:
+                    best = top
             if best:
                 out["tmdb_id"] = best.sid
                 out["tmdb_title"] = best.title or best.original_title
@@ -1911,7 +1961,13 @@ class MetadataClient:
 
         if self.tmdb_key:
             for q in queries[:2]:
-                pools["tmdb"] += self.search_tmdb(q, media_type)
+                got = self.search_tmdb(q, media_type)
+                # 剧集目录名常没有季号（瓦舍江湖[全35集]…），会被判成
+                # 电影去搜；TMDB 里它却是 tv，movie 类型查不到。
+                # 电影查不到时补搜一次 tv，避免整部剧匹配不到。
+                if not got and media_type == "movie":
+                    got = self.search_tmdb(q, "series")
+                pools["tmdb"] += got
 
         for c in bangumi_all + douban_all + imdb_all + pools["tmdb"]:
             c.score = self._score(parsed, c, media_type)

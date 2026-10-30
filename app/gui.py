@@ -3296,17 +3296,48 @@ class App(tk.Tk):
             m.tmdb = cand
         # 手动选 Bangumi/豆瓣时，也把补齐到的 IMDb/TMDB 条目挂上，
         # 这样目录第二段可以用它们的英文名。
+        # 关键：只要**有 ID 就挂**，标题可以留空后补。
+        # 以前要求必须同时有标题，导致手动套用 IMDb 后 match.tmdb 为
+        # None，「副标题 = TMDB」查不到任何分集名。
         imdb_title = str(ids.get("imdb_title") or "")
-        if not m.imdb and imdb_id and imdb_title:
+        if not m.imdb and imdb_id:
             m.imdb = Candidate(source="imdb", title=imdb_title,
                                original_title=imdb_title,
                                year=cand.year, sid=imdb_id)
         tmdb_title = str(ids.get("tmdb_title") or "")
-        if not m.tmdb and tmdb_id and tmdb_title:
+        if not m.tmdb and tmdb_id:
             m.tmdb = Candidate(source="tmdb", title=tmdb_title,
                                original_title=str(ids.get("tmdb_original") or
                                                   tmdb_title),
                                year=cand.year, sid=tmdb_id)
+        # 方案 1：搜索阶段已经为每个候选预取了它自己的「英文名/分集名」，
+        # 这里直接把这些词句挂到对应来源上，双击即可套用，无需再联网。
+        pre = cand.extra if isinstance(cand.extra, dict) else {}
+        pre_en = str(pre.get("english_title") or "")
+        pre_eps = pre.get("episode_titles") or {}
+        if pre_en:
+            src = cand.source
+            holder = {"imdb": m.imdb, "tmdb": m.tmdb,
+                      "douban": m.douban, "bangumi": m.bangumi}.get(src)
+            if holder is None:
+                holder = Candidate(source=src, title=cand.title,
+                                   original_title=pre_en,
+                                   year=cand.year, sid=cand.sid)
+                holder.extra = {}
+                if src == "imdb":
+                    m.imdb = holder
+                elif src == "tmdb":
+                    m.tmdb = holder
+                elif src == "douban":
+                    m.douban = holder
+                elif src == "bangumi":
+                    m.bangumi = holder
+            if isinstance(holder.extra, dict):
+                holder.extra.setdefault("english_title", pre_en)
+                if not holder.original_title:
+                    holder.original_title = pre_en
+                if pre_eps:
+                    holder.extra.setdefault("episode_titles", pre_eps)
         # series_title 决定最终显示/命名的剧名，同样不能变成纯英文：
         # 手动选 IMDb 条目时 base 是 Ever Night 2，而这部剧的中文名
         # 是「将夜」，主标题必须继续用中文。
