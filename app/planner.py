@@ -1671,10 +1671,13 @@ class Planner:
                 and e.parsed.season and e.parsed.season > 0)
             if file_seasons:
                 season_from_file = file_seasons.most_common(1)[0][0]
+        # 路径链路里已经写明的编号：有它就不用做标题搜索了。
+        chain_imdb, chain_tmdb = self._existing_ids(mr, entries, title)
         return ParsedName(raw=mr.item.name, title=title, queries=queries[:6],
                           year=year, season=season, is_episode=False,
                           ext="", warnings=[], conflict_titles=conflict_titles,
-                          file_season=season_from_file)
+                          file_season=season_from_file,
+                          imdb_id=chain_imdb, tmdb_id=chain_tmdb)
 
     def _match(self, parsed: ParsedName, media_type: str,
                category_hint: str = "") -> MatchResult:

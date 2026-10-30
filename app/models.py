@@ -75,6 +75,11 @@ class ParsedName:
     # 上下文整理时从视频文件名里收集到的季号（例如目录里没写 Sxx，
     # 但文件名是 S2E01），供剧集任务在目录名缺季号时补用。
     file_season: Optional[int] = None
+    # 路径链路里已经写明的 IMDb / TMDB 编号（目录名、文件名里的
+    # [imdbid-tt…] / {tmdbid-…}）。有编号就直接按编号取数，
+    # 不再做任何标题搜索，省掉一整轮网络请求。
+    imdb_id: str = ""
+    tmdb_id: str = ""
 
     @property
     def season_episode(self) -> str:

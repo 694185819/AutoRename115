@@ -1810,7 +1810,35 @@ class MetadataClient:
         """按搜索词把四个来源的候选抓回来（带扩展查询与提前停止）。
 
         只负责"搜"，不负责"选"；选择交给 app.decider.decide()。
+
+        省流原则：路径链路里已经有了的信息不再联网查。
+        - 已有 IMDb/TMDB 编号：直接按编号取一条候选，**一次网络请求**，
+          不做任何标题搜索（编号是最权威的身份）。
+        - 否则只围绕已确定的片名搜索，并用本地已有的英文名扩展查询。
         """
+        pools: dict[str, list[Candidate]] = {
+            "bangumi": [], "douban": [], "imdb": [], "tmdb": []}
+
+        # ① 链路里已有编号：按编号直接取，省掉全部标题搜索
+        local_imdb = str(getattr(parsed, "imdb_id", "") or "")
+        local_tmdb = str(getattr(parsed, "tmdb_id", "") or "")
+        if local_imdb or local_tmdb:
+            by_id = []
+            try:
+                hit = self.match_by_ids(
+                    local_imdb, local_tmdb, media_type,
+                    parsed.title or "")
+            except Exception:
+                hit = None
+            if hit is not None:
+                for c in (hit.douban, hit.bangumi, hit.imdb, hit.tmdb):
+                    if c is not None:
+                        pools[c.source].append(c)
+                        by_id.append(c)
+            if by_id:
+                self.log("已按路径里的编号直接取回条目，跳过标题搜索。")
+                return [local_imdb or local_tmdb], pools
+
         base_queries = _dedupe_str(parsed.queries or [parsed.title])
         # 一个字（“剧”“番”）搜不出片名：整轮自动搜索直接放弃，
         # 不要退回去用这些词，否则又会搜到“剧场版/京剧猫”之类的错误条目。
