@@ -152,10 +152,16 @@ class NamingRulePanel(QWidget):
         # 第二行：日番格式 + 电影命名
         row2 = QHBoxLayout()
         row2.setSpacing(4)
-        row2.addWidget(QLabel("日番"))
+        # 「日番」二字本身带悬浮提示：说明会自动套用规则、可改「不使用」跳过
+        from app.naming_panel import JP_STYLE_TOOLTIP as _JP_TIP
+        jp_label = QLabel("日番")
+        jp_label.setCursor(Qt.WhatsThisCursor)
+        jp_label.setToolTip(_JP_TIP)
+        row2.addWidget(jp_label)
         self.combo_jp = QComboBox()
         self.combo_jp.addItems(list(self._jp_labels.values()))
         self.combo_jp.setMinimumWidth(260)
+        self.combo_jp.setToolTip(_JP_TIP)
         row2.addWidget(self.combo_jp)
         row2.addSpacing(10)
         row2.addWidget(QLabel("电影"))

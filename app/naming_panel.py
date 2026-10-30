@@ -58,6 +58,73 @@ MOVIE_STYLES = {
 }
 MOVIE_LABELS = dict(MOVIE_STYLES)
 
+# 日番规则说明：鼠标悬浮在「日番」二字或下拉框上时显示
+JP_STYLE_TOOLTIP = (
+    "检测到日番类型时，会默认按这里的规则命名（例如加上 [BD-REMUX]、"
+    "用日文名等），这是自动生效的。\n\n"
+    "如果不希望套用这条规则，把下拉选为「不使用（日番按普通规则命名）」，"
+    "日番就会和其它剧集一样按普通规则命名。"
+)
+
+
+def _attach_tooltip(widget, text: str, delay: int = 450) -> None:
+    """给任意 Tk 控件加悬浮提示（Tk 没有内置 tooltip，自己画一个小窗）。
+
+    鼠标停留 delay 毫秒后弹出，移开立刻消失；不会抢焦点，也不影响点击。
+    """
+    state: dict = {"tip": None, "after": None}
+
+    def hide(_event=None) -> None:
+        if state["after"] is not None:
+            try:
+                widget.after_cancel(state["after"])
+            except Exception:
+                pass
+            state["after"] = None
+        tip = state["tip"]
+        state["tip"] = None
+        if tip is not None:
+            try:
+                tip.destroy()
+            except Exception:
+                pass
+
+    def show() -> None:
+        state["after"] = None
+        if state["tip"] is not None:
+            return
+        try:
+            import tkinter as _tk
+            x = widget.winfo_rootx() + 12
+            y = widget.winfo_rooty() + widget.winfo_height() + 6
+            tip = _tk.Toplevel(widget)
+            tip.wm_overrideredirect(True)
+            tip.wm_geometry(f"+{x}+{y}")
+            try:
+                tip.attributes("-topmost", True)
+            except Exception:
+                pass
+            label = _tk.Label(tip, text=text, justify="left",
+                              background="#ffffe1", foreground="#333",
+                              relief="solid", borderwidth=1,
+                              font=("Microsoft YaHei UI", 9),
+                              wraplength=380, padx=8, pady=6)
+            label.pack()
+            state["tip"] = tip
+        except Exception:
+            state["tip"] = None
+
+    def schedule(_event=None) -> None:
+        hide()
+        try:
+            state["after"] = widget.after(delay, show)
+        except Exception:
+            state["after"] = None
+
+    widget.bind("<Enter>", schedule, add="+")
+    widget.bind("<Leave>", hide, add="+")
+    widget.bind("<ButtonPress>", hide, add="+")
+
 
 class NamingRulePanel(ttk.LabelFrame):
     """主界面的“命名规则”面板：剧集、日番、电影都由它统一配置。"""
@@ -117,11 +184,15 @@ class NamingRulePanel(ttk.LabelFrame):
         ttk.Radiobutton(second, text="否", value=False,
                         variable=self.spec_var,
                         command=self._refresh).pack(side="left", padx=(2, 12))
-        ttk.Label(second, text="日番").pack(side="left")
+        # 「日番」二字本身就带悬浮提示（鼠标移上去显示说明）
+        jp_label = ttk.Label(second, text="日番", cursor="question_arrow")
+        jp_label.pack(side="left")
+        _attach_tooltip(jp_label, JP_STYLE_TOOLTIP)
         self.jp_box = ttk.Combobox(
             second, textvariable=self.jp_var, state="readonly", width=24,
             values=list(JP_FOLDER_OPTIONS.values()))
         self.jp_box.pack(side="left", padx=(4, 12))
+        _attach_tooltip(self.jp_box, JP_STYLE_TOOLTIP)
         self.jp_box.bind("<<ComboboxSelected>>", lambda e: self._refresh())
         ttk.Label(second, text="电影").pack(side="left")
         self.movie_box = ttk.Combobox(
