@@ -370,7 +370,15 @@ def pick_primary(cands: list[Candidate],
             ts >= 0.70 and c.extra.get("season_score") == 1.0)
 
     picked = [c for c in pool if good(c)]
-    return max(picked, key=lambda c: c.score, default=None)
+    if not picked:
+        return None
+    # 同名同分时取首播更早的那一部：
+    # IMDb 会同时返回 “Ever Night (2018)” 和一部 2026 年的同名新剧，
+    # 按分数会随机取到后者，导致整部剧的年份、ID 全错。
+    # 剧集的主条目应该是这部作品最早的那一季/那一版。
+    return max(picked,
+               key=lambda c: (c.score,
+                              -int(c.year) if c.year else -10000))
 
 
 def pick_imdb(cands: list[Candidate], media_type: str,

@@ -463,6 +463,42 @@ def _is_generic_dir(name: str) -> bool:
     return any(h in low for h in GENERIC_HINTS)
 
 
+def _titles_related(query: str, title: str) -> bool:
+    """query 是否是 title 的别名（同一部作品的不同语言/写法）。
+
+    搜索词只接受“同一部作品的别名”：
+    - 中文名与英文名/日文名并列（末日后酒店 / Apocalypse Hotel /
+      アポカリプスホテル）→ 允许；
+    - 上层分类名（剧 / 国漫 / 合集名）→ 不允许；
+    - 同目录里混进来的别的剧（季目录放了 Friends）→ 不允许。
+
+    跨语言放行只在“整条目录名同时含中文和该外文名”时成立，
+    避免把「东离剑游记」和无关的「Friends」当成同一部作品。
+    """
+    a, b = norm_title(query), norm_title(title)
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    # 包含关系（“将夜”与“将夜 第一季”）
+    if a in b or b in a:
+        return True
+    return titles_agree(query, title)
+
+
+def _parallel_aliases(text: str) -> list[str]:
+    """从「[中文名][English Name][日本語名]」这类并列目录名里取各组名字。
+
+    只有同一条目录名里**并列出现**的多语言名才算同一作品的别名。
+    """
+    if not text:
+        return []
+    groups = re.findall(r"[\[【]([^\]】]+)[\]】]", text)
+    if not groups:
+        return []
+    return [g.strip() for g in groups if g.strip()]
+
+
 def _usable_query(q: str) -> bool:
     """能拿去搜元数据的词。
 
@@ -1444,41 +1480,50 @@ class Planner:
         # 这时只要文件名没有有效片名，就用上级目录名。
         # 一个“电影库/电视剧库”目录（如 1、国内）里有多个片名时，
         # 必须用文件自己的片名，不能把库目录当电影名。
-        use_folder = (not prefer_file_title and bool(folder_title) and
-                      (not _is_generic_dir(mr.item.name) or
-                       not common_file_title))
-        if not use_folder and common_file_title:
-            title = common_file_title
+        # 片名只能来自“文件 → 当前目录 → 逐级向上”这条链路，
+        # 上层分类目录（国家/类型）绝不参与命名与搜索。
+        if prefer_file_title and common_file_title:
+            title, title_from = common_file_title, "视频文件名"
+        elif common_file_title and (
+                not folder_title or
+                _is_generic_dir(mr.item.name)):
+            title, title_from = common_file_title, "视频文件名"
         elif folder_title:
-            title = folder_title
+            title, title_from = folder_title, "当前文件夹名"
         else:
-            # 季目录/分区目录本身不是片名（例如 “S1替换双语字幕”）。
-            # 片名只能来自上级/上上级目录或文件；都没有就留空，
-            # 让任务进“需确认”，不能拿说明文字去联网搜索。
-            title = common_file_title
+            title, title_from = common_file_title, "视频文件名"
+        if title:
+            self.log(f"片名取自{title_from}：{title}")
 
-        queries: list[str] = []
-        # 独立剧集/电影目录的上级搜索词（含中/日/英别名）参与匹配；
-        # 库目录里的文件夹名只是分区，不能拿它当搜索词。
-        # 这里的词由 _context_parsed 按来源筛过：只保留当前目录，
-        # 以及提供片名/与片名一致的那一级上级目录。
+        # 搜索词只围绕这个片名生成：链路里其它层级（国家/类型/合集）
+        # 一律不进搜索词，这正是“不再拿无关词去搜”的关键。
+        # 但同一作品的别名（中文名/英文名/日文名）要保留——
+        # 「[末日后酒店][Apocalypse Hotel][アポカリプスホテル]」这类
+        # 多语言并列目录名，能让各来源都搜得到。
+        extra: list[str] = []
         if not prefer_file_title:
-            for q in folder_parsed.queries:
-                if _usable_query(q) and q not in queries:
-                    queries.append(q)
-        # 文件自己的搜索词也必须服从本地锚点。一个季目录里混进的
-        # “Friends.S01E01”不能因为文件名独立，就获得一次整剧搜索机会。
-        anchor_ok = _usable_query(title)
+            extra.extend(folder_parsed.queries or [])
         for e in title_entries:
-            for q in e.parsed.queries:
-                if not _usable_query(q):
-                    continue
-                if anchor_ok and not titles_agree(q, title):
-                    continue
-                if q not in queries:
-                    queries.append(q)
-        if _usable_query(title) and title not in queries:
-            queries.insert(0, title)
+            extra.extend(e.parsed.queries or [])
+        # 「[末日后酒店][Apocalypse Hotel][アポカリプスホテル]」这种
+        # 同一条目录名里并列的多语言名，都是这部作品的别名。
+        parallel = _parallel_aliases(mr.item.name)
+        queries: list[str] = []
+        if _usable_query(title):
+            queries.append(title)
+        anchor_ok = _usable_query(title)
+        for q in extra:
+            q = (q or "").strip()
+            if not _usable_query(q) or q in queries:
+                continue
+            if q in parallel:
+                # 同一目录名里并列出现 → 肯定是别名
+                queries.append(q)
+                continue
+            if anchor_ok and not _titles_related(q, title):
+                # 与片名无关的词（上层分类/合集名/混进来的别的剧）丢弃
+                continue
+            queries.append(q)
 
         # 季目录里如果所有有意义的视频文件名都和上级剧名对不上，
         # 说明本地层级本身可能有问题（放错目录/多部剧混放）。此时仍
