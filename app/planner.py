@@ -849,6 +849,26 @@ class Planner:
                 season_dirs = loose
         part_dirs = [d for d in dirs if is_part_dir(d.name)]
         subs_dirs = [d for d in dirs if is_subs_dir(d.name)]
+        # 字幕/音轨目录永远不当季目录（名字可能是 ass/sup/subs/字幕…，
+        # 也可能是别的写法，但内容一定是字幕而不是视频）。
+        season_dirs = [d for d in season_dirs if not is_subs_dir(d.name)]
+        # 再按「内容」兜底：名字不像字幕目录（ass/sup/随便起的名字），
+        # 但里面一个视频都没有的目录，同样不能当季目录。
+        kept: list[P115Item] = []
+        for d in season_dirs:
+            try:
+                kids = self._list(client, d.fid)
+            except Exception:      # noqa: BLE001
+                kept.append(d)
+                continue
+            has_video = any(k.is_video for k in kids)
+            if has_video:
+                kept.append(d)
+            else:
+                subs_dirs.append(d)
+                self.log(f"「{d.name}」里没有视频，已按字幕/附属目录处理，"
+                         "不作为季目录参与命名。")
+        season_dirs = kept
         structure = [d for d in dirs if d.name.upper() in
                      ("BDMV", "VIDEO_TS", "CERTIFICATE")]
         root_title = parse_name(dir_item.name, is_dir=True).title
@@ -919,16 +939,60 @@ class Planner:
                                         container=c, folder_season=root_season))
                         except Exception:
                             pass
-            # 字幕目录
-            for sd in subs_dirs:
-                try:
-                    sub_children = self._list(client, sd.fid)
-                except Exception:
-                    continue
-                for c in sub_children:
-                    if c.ext in (SUB_EXTS | AUDIO_EXTS):
+            # 字幕目录：只收「与视频同级」的字幕。
+            #
+            # 规则来自实际使用：字幕要跟视频放在同一个文件夹里，才跟着
+            # 视频一起改名。ass/ / sup/ / subs/ 这类被单独挑出来的
+            # 字幕归档目录，若和视频不在同一层（视频在 Season 01/ 里），
+            # 就只是一个备份/素材夹，**不参与命名**。
+            _same_level_videos = [e for e in root.entries
+                                  if e.is_video and e.container is None]
+            _video_eps: set = set()
+            _video_titles: list[str] = []
+            for _e in _same_level_videos:
+                if _e.parsed.episode is not None:
+                    _video_eps.add((_e.parsed.season, _e.parsed.episode))
+                    _video_eps.add((None, _e.parsed.episode))
+                if _e.parsed.title:
+                    _video_titles.append(_e.parsed.title)
+            root_title = parse_name(dir_item.name, is_dir=True).title
+            if root_title:
+                _video_titles.append(root_title)
+
+            def _sub_belongs(parsed) -> bool:
+                """这份字幕是否属于本剧（按集号 + 剧名双重校验）。"""
+                ep = parsed.episode
+                if ep is None:
+                    return True          # 没集号，交给后续匹配
+                if (parsed.season, ep) not in _video_eps and \
+                        (None, ep) not in _video_eps:
+                    return False         # 这一集没有视频
+                t = parsed.title
+                if not t or not _video_titles:
+                    return True
+                # 剧名必须与任一视频标题/目录名相关，否则是别的剧
+                return any(titles_agree(t, vt) for vt in _video_titles
+                           if vt)
+
+            if not _same_level_videos:
+                # 本层没有视频（视频都在季子目录里），字幕目录只是归档，
+                # 不收集——用户明确要求：没有视频的文件夹不参与命名。
+                pass
+            else:
+                for sd in subs_dirs:
+                    try:
+                        sub_children = self._list(client, sd.fid)
+                    except Exception:
+                        continue
+                    for c in sub_children:
+                        if c.ext not in (SUB_EXTS | AUDIO_EXTS):
+                            continue
+                        parsed = parse_name(c.name,
+                                            parent_season=root_season)
+                        if not _sub_belongs(parsed):
+                            continue
                         root.entries.append(FileEntry(
-                            item=c, parsed=parse_name(c.name),
+                            item=c, parsed=parsed,
                             container=sd, folder_season=root_season))
             # 合集根目录同时有散装电影和季目录时（例如一个系列文件夹里
             # 放了两部剧场版 ISO，另有 S1/S2 两个剧集目录），不能只
@@ -1248,6 +1312,32 @@ class Planner:
                 e = FileEntry(item=r, parsed=parse_name(r.name))
                 media_roots.append(MediaRoot(item=r, entries=[e]))
                 continue
+            # 核心规则：本软件改的是视频文件名，视频改了才顺道改字幕。
+            # 用户选中的目录如果**整棵子树里一个视频都没有**，
+            # 就直接忽略——不管它叫什么名字（ass/sup/Season 02/随便起的），
+            # 不参与搜索、不生成任务。
+            try:
+                probe = self._list(client, r.fid)
+            except Exception as e:      # noqa: BLE001
+                self.log(f"读取目录失败：{r.name}：{e}")
+                continue
+            has_video = any(c.is_video for c in probe)
+            if not has_video:
+                # 再看一层子目录：Season 01/ 这类视频可能在子目录里
+                for c in probe:
+                    if not c.is_dir:
+                        continue
+                    try:
+                        kids = self._list(client, c.fid)
+                    except Exception:      # noqa: BLE001
+                        continue
+                    if any(k.is_video for k in kids):
+                        has_video = True
+                        break
+            if not has_video:
+                self.log(f"已忽略「{r.name}」：整个目录里没有视频文件，"
+                         "不需要改名。")
+                continue
             media_roots += self._discover(client, r)
 
         plans: list[PlanItem] = []
@@ -1409,7 +1499,13 @@ class Planner:
         if mr.unsupported:
             return [self._bdmv_plan(mr)]
         videos = mr.videos
+        # 没有视频 = 不需要改名，也不参与任何搜索。
+        # 按内容判断而不是按名字：文件夹名千奇百怪（ass / sup /
+        # 随便起的名），只要里面没有视频就一律忽略。
         if not videos:
+            if mr.item.is_dir and mr.entries:
+                self.log(f"已跳过「{mr.item.name}」：其中没有视频文件，"
+                         "不需要改名。")
             return []
 
         # 当前文件夹名 + 上级文件夹名一起参与识别
@@ -3609,15 +3705,19 @@ class Planner:
                 label = NAMING_SOURCE_LABELS.get(name_source, name_source)
                 self._mark(plan, qc.name_source_no_episodes(label))
 
-        # 季目录重命名
+        # 季目录重命名（纯字幕目录 ass/sup/subs 等不参与，不当季目录处理）
         if self.options.rename_season_folders and mr.season_dirs:
             seen: dict[int, int] = {}
             for sd in mr.season_dirs:
+                if is_subs_dir(sd.name):
+                    continue
                 s = season_from_dir(sd.name)
                 if s is None:
                     continue
                 seen[s] = seen.get(s, 0) + 1
             for sd in mr.season_dirs:
+                if is_subs_dir(sd.name):
+                    continue
                 s = season_from_dir(sd.name)
                 if s is None:
                     continue
@@ -3714,8 +3814,15 @@ class Planner:
                                     role="episode", parent_id=e.item.parent_id))
 
         # 字幕/音轨（多字幕机制：每轮重建都重新归集）
+        # 核心规则：本软件改的是**视频文件名**，视频改了才顺道改字幕。
+        # 如果这一轮没有任何视频获得新名字（例如没匹配到条目、
+        # 集号无法确定），字幕/音轨一律保持原名，不做任何改动。
         self._pending_multi_subs = []
-        if self.options.rename_subtitles and sidecars:
+        # 只有「视频这一轮确实改了名」才处理字幕：video_map 非空但名字
+        # 没变化的情况不算（例如没匹配到条目时算出的名字与原名相同）。
+        video_renamed = any(
+            op.role == "episode" for op in ops)
+        if self.options.rename_subtitles and sidecars and video_renamed:
             sub_ops, sub_notes = self._sidecar_ops(sidecars, video_map)
             ops += sub_ops
             notes += sub_notes
