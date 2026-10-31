@@ -50,6 +50,11 @@ RE_EP_TRAIL = re.compile(
 # 避免把「1984」「琅琊榜2」这类含数字的片名误判成集号。
 RE_EP_CJK_TAIL = re.compile(
     r"(?<=[\u4e00-\u9fff\u3040-\u30ff])(\d{1,4})(?:v\d+)?\s*$")
+# 「片名 01 中文本集标题」：集号后面还跟着中文副标题。
+# 例：名侦探柯南：给工藤新一的挑战书 01 成为柯南前的高中生侦探 破解不伦杀人之谜
+#     （集号在两段中文之间，前后都有空格，且不是年份）
+RE_EP_MID_CN = re.compile(
+    r"(?:^|[\s._])(\d{1,4})(?:v\d+)?[\s._]+(?=[\u4e00-\u9fff])")
 RE_YEAR = re.compile(r"(?<!\d)(19\d{2}|20\d{2})(?!\d)")
 RE_RESOLUTION = re.compile(r"(?i)(?<!\d)\d{3,4}\s*[x×]\s*\d{3,4}(?!\d)")
 RE_RELEASE_NOISE = re.compile(
@@ -534,6 +539,27 @@ def parse_name(raw: str, is_dir: bool = False,
                 # 只有两位以上且非全零的数字才当作集号。
                 raw = m.group(1)
                 if len(raw) < 2 or num == 0:
+                    continue
+                ep_match = m
+                break
+        if ep_match is None and not is_dir:
+            # 「片名 01 中文本集标题」：集号后面还有中文副标题，
+            # 例如「名侦探柯南：给工藤新一的挑战书 01 成为柯南前的高中生侦探」。
+            # 这类写法集号不在结尾，靠 RE_EP_TRAIL 抓不到。
+            for m in RE_EP_MID_CN.finditer(work):
+                num = int(m.group(1))
+                if 1900 <= num <= 2099 or overlaps_season(m):
+                    continue
+                if _is_part_number(work, m) or _is_audio_channel(work, m):
+                    continue
+                # 必须是「两段中文之间」的数字：前面有片名，后面跟中文
+                head = work[:m.start()].strip(" ._-")
+                tail = work[m.end():].strip()
+                if len(head) < 2 or not tail:
+                    continue
+                # 片名后面直接跟年份（如「流浪地球 2049 影史最伟大」）
+                # 已由 1900-2099 排除；这里再排除单/双位数像分辨率的情况
+                if num <= 0:
                     continue
                 ep_match = m
                 break
