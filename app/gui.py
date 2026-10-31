@@ -3850,7 +3850,10 @@ class App(tk.Tk):
         win.title(f"重命名预览 - {p.title}")
         win.transient(self)
         win.minsize(900, 420)
-        self._center_window(win, 1260, 560, parent=self)
+        # 有大量字幕时窗口需要更高，按内容估算（上限屏幕 85%）
+        pending_n = len(getattr(p, "multi_subs", None) or [])
+        want_h = 560 + (min(pending_n, 60) // 4) * 26
+        self._center_window(win, 1260, min(want_h, 900), parent=self)
 
         style = ttk.Style(win)
         style.configure("Preview.Treeview", rowheight=22,
@@ -3858,14 +3861,16 @@ class App(tk.Tk):
         style.configure("Preview.Treeview.Heading",
                         font=("Microsoft YaHei UI", 9, "bold"))
 
+        # 顶部标题 + 说明：说明很长时也要能看全 → 限高 + 滚动
         ttk.Label(win, text=f"当前：{p.current_name}",
                   font=("Microsoft YaHei UI", 10, "bold"),
                   wraplength=1220, justify="left").pack(
                       anchor="w", padx=12, pady=(10, 2))
         if p.note:
-            ttk.Label(win, text=p.note, foreground="#a15c00",
-                      wraplength=1220, justify="left").pack(
-                          anchor="w", padx=12, pady=(0, 2))
+            note_box = ttk.Frame(win)
+            note_box.pack(fill="x", padx=12, pady=(0, 2))
+            self._scrolled_label(note_box, p.note, foreground="#a15c00",
+                                 height=3).pack(fill="x")
         frame = ttk.Frame(win)
         frame.pack(fill="both", expand=True, padx=12, pady=(6, 6))
         cols = ("sel", "role", "old", "new")
@@ -3963,6 +3968,56 @@ class App(tk.Tk):
                    command=lambda: set_all(True)).pack(
                        side="right")
 
+    def _scrolled_label(self, parent, text: str, height: int = 3,
+                        foreground: str = "#000",
+                        wraplength: int = 1180):
+        """限高的只读文本框：内容多时可滚动，避免撑破窗口。"""
+        holder = ttk.Frame(parent)
+        txt = tk.Text(holder, height=height, wrap="word",
+                      relief="flat", borderwidth=0,
+                      background=parent.winfo_toplevel().cget("bg")
+                      if hasattr(parent.winfo_toplevel(), "cget") else "#f0f0f0",
+                      foreground=foreground,
+                      font=("Microsoft YaHei UI", 9))
+        txt.insert("1.0", text or "")
+        txt.configure(state="disabled")
+        vs = ttk.Scrollbar(holder, orient="vertical", command=txt.yview)
+        txt.configure(yscrollcommand=vs.set)
+        txt.pack(side="left", fill="x", expand=True)
+        vs.pack(side="right", fill="y")
+        return holder
+
+    def _scrolled_frame(self, parent, height: int):
+        """返回 (容器, 内部frame)：内部内容超长时可垂直滚动。"""
+        holder = ttk.Frame(parent)
+        canvas = tk.Canvas(holder, highlightthickness=0,
+                           borderwidth=0, height=height)
+        vs = ttk.Scrollbar(holder, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vs.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        vs.pack(side="right", fill="y")
+        inner = ttk.Frame(canvas)
+        win_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _on_configure(_e=None) -> None:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _on_canvas(_e) -> None:
+            canvas.itemconfigure(win_id, width=canvas.winfo_width())
+
+        inner.bind("<Configure>", _on_configure)
+        canvas.bind("<Configure>", _on_canvas)
+
+        def _wheel(event) -> None:
+            delta = -1 if getattr(event, "delta", 0) > 0 else 1
+            canvas.yview_scroll(delta, "units")
+
+        canvas.bind("<Enter>",
+                    lambda e: canvas.bind_all("<MouseWheel>", _wheel))
+        canvas.bind("<Leave>",
+                    lambda e: canvas.unbind_all("<MouseWheel>"))
+        return holder, inner, canvas
+
     def _build_multi_sub_area(self, win, p: PlanItem, tree, by_iid,
                               footer, refresh_count) -> None:
         """预览窗口左下角：多字幕机制设置区。
@@ -3977,17 +4032,24 @@ class App(tk.Tk):
         mode = getattr(p, "multi_sub_mode", "")
         mode_label = Planner._MULTI_SUB_MODES.get(mode, "多份字幕")
 
-        box = ttk.LabelFrame(
+        # 多字幕区放在窗口底部，内容可能很多（几十份字幕）：
+        # 用固定高度 + 垂直滚动，保证「按选择命名」等按钮始终可见。
+        holder = ttk.LabelFrame(
             win, text=f"多字幕设置（自动检测：{mode_label}）", padding=8)
-        box.pack(fill="x", padx=12, pady=(0, 6), before=footer)
-
+        holder.pack(fill="x", padx=12, pady=(0, 6), before=footer)
         ttk.Label(
-            box,
+            holder,
             text=("同一集出现多份字幕，为避免误改已暂停自动重命名。\n"
                   "勾选要保留的字幕 → 点「按选择命名」应用到预览；"
                   "不想要的取消勾选即可（不会删文件）。"),
             foreground="#a15c00", justify="left", wraplength=1150).pack(
                 anchor="w", pady=(0, 6))
+
+        # 滚动区高度按条目数估算，最多 8 行
+        est_rows = max(2, min(len(pending), 8))
+        scroll_holder, box, _canvas = self._scrolled_frame(
+            holder, height=est_rows * 26)
+        scroll_holder.pack(fill="x", expand=False)
 
         # 按集分组显示
         groups: dict = {}
@@ -4012,12 +4074,20 @@ class App(tk.Tk):
                 var = tk.BooleanVar(value=True)
                 checks.append((d, var))
                 kind = KIND_LABELS.get(d.get("kind", ""), "未识别")
-                ttk.Checkbutton(
+                cb = ttk.Checkbutton(
                     row, text=f"{kind}（{d['old_name']}）",
-                    variable=var).pack(side="left", padx=(0, 10))
+                    variable=var)
+                cb.pack(side="left", padx=(0, 10))
+                # 鼠标滚轮在复选框上也能滚动列表
+                cb.bind("<MouseWheel>", lambda e, c=_canvas: (
+                    c.yview_scroll(-1 if e.delta > 0 else 1, "units"),
+                    "break")[1])
 
-        act = ttk.Frame(box)
-        act.pack(fill="x", pady=(8, 0))
+        # 按钮固定在 holder 上（不随滚动区滚走）
+        act_holder = ttk.Frame(holder)
+        act_holder.pack(fill="x", pady=(8, 0))
+
+        act = act_holder
 
         def _video_base_for(ep) -> str:
             """找该集视频的新名（不含扩展名）作为字幕前缀。"""
