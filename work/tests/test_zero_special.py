@@ -86,7 +86,8 @@ def main():
     by_old = {op.old_name: op.new_name for op in plan.ops}
     assert "S00E01" in by_old[f"{SHOW} S1E00.m2ts"]
     sub = by_old[f"{SHOW} S1E00.zh-Hans.ass"]
-    assert "S00E01" in sub and sub.endswith(".zh-Hans.ass"), sub
+    # 字幕语言标记统一成简洁中文（zh-Hans → 简体）
+    assert "S00E01" in sub and sub.endswith(".简体.ass"), sub
     iso = next(v for k, v in by_old.items() if k.endswith(".iso"))
     assert "S00E02" in iso, iso
     assert "S01E01" in by_old[f"{SHOW} S1E01.m2ts"]
@@ -94,8 +95,8 @@ def main():
                if op.role == "subtitle"}
     zero_sub = next(v for k, v in sub_ops.items() if " 00 (" in k)
     main_sub = next(v for k, v in sub_ops.items() if " 01 (" in k)
-    assert "S00E01" in zero_sub and zero_sub.endswith(".sc.sup"), zero_sub
-    assert "S01E01" in main_sub and main_sub.endswith(".sc.sup"), main_sub
+    assert "S00E01" in zero_sub and zero_sub.endswith(".简体.sup"), zero_sub
+    assert "S01E01" in main_sub and main_sub.endswith(".简体.sup"), main_sub
     assert "第 0 集" in plan.note, plan.note
     assert "唯一剩余" in plan.note, plan.note
     assert "集号是 0" not in plan.note, plan.note

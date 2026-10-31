@@ -35,6 +35,29 @@ from .planner import (CATEGORY_LABELS, NamingOptions, Planner, _usable_query,
 from .undo import UndoManager
 
 APP_TITLE = "115 海报墙重命名助手"
+
+
+def _stem_of(name: str) -> str:
+    """文件名去掉最后一个扩展名。"""
+    base = str(name or "")
+    if "." in base:
+        return base.rsplit(".", 1)[0]
+    return base
+
+
+def _ext_of(name: str) -> str:
+    """文件名最后一个扩展名（含点）。"""
+    base = str(name or "")
+    if "." in base:
+        return "." + base.rsplit(".", 1)[1]
+    return ""
+
+
+# 「再点一次来源」时自动重搜的可信度门槛。
+# 低于 _MIN_ACCEPT 一律不套用（宁可留空让用户手动搜，也不写错名字）；
+# 达到 _CONFIDENT 就不再继续换关键词尝试，省请求。
+_MIN_ACCEPT = 0.45
+_CONFIDENT = 0.80
 # 启动后自动检查一次；运行期间每 2 小时再检查一次。只访问 GitHub，
 # 失败时静默记录，不打断正在进行的扫描/改名。
 AUTO_UPDATE_DELAY_MS = 5000
@@ -2382,10 +2405,29 @@ class App(tk.Tk):
                     pass
                 self._load_info()
                 return
+            cand = payload
+            score = float(getattr(cand, "score", 0) or 0)
+            # 中等分数（能相关但不够确定）：先问一句，避免写错名字。
+            # 高置信度直接套用，低分在上一步已经被拒绝了。
+            if score < _CONFIDENT:
+                ok = messagebox.askyesno(
+                    APP_TITLE,
+                    f"{full_label} 找到最接近的条目：\n\n"
+                    f"  {cand.title}\n"
+                    f"  年份：{cand.year or '未知'}\n"
+                    f"  可信度：{score:.0%}\n\n"
+                    f"任务：《{p.title}》（{p.year or '未知'}）\n\n"
+                    f"采用这一条吗？选「否」可右键手动搜索。",
+                    parent=self)
+                if not ok:
+                    self._log(f"已放弃 {full_label} 的搜索结果"
+                              f"（{cand.title}，可信度 {score:.0%}）。")
+                    self._load_info()
+                    return
             self._apply_manual_candidate(
-                p, payload, self.meta.resolve_ids(payload, p.media_type))
-            self._log(f"已从 {full_label} 取回：{payload.title}"
-                      f"（{payload.year or '?'}）")
+                p, cand, self.meta.resolve_ids(cand, p.media_type))
+            self._log(f"已从 {full_label} 取回：{cand.title}"
+                      f"（{cand.year or '?'}，可信度 {score:.0%}）")
             self._render_plans()
 
         # run_async 自己会置 busy；这里不能提前置位，否则会被当成
@@ -2439,7 +2481,10 @@ class App(tk.Tk):
         words += _cjk_variants(query)
 
         seen = set()
-        pool = []
+        collected: list = []
+        # 不再「第一个有结果的词就直接采用」——那样很容易抓到
+        # 分数极低的无关条目（例如用英文别名搜到完全无关的电影）。
+        # 改为：对每个词取前几条候选汇总，最后统一按分数+年份挑选。
         for w in words:
             w = w.strip()
             if not w or w in seen:
@@ -2452,14 +2497,53 @@ class App(tk.Tk):
             if not pool and source == "tmdb":
                 other = "movie" if p.media_type != "movie" else "series"
                 pool = self.meta.search_tmdb(w, other) or []
-            if pool:
+            if not pool:
+                continue
+            for c in pool[:6]:
+                c.score = self.meta._score(parsed, c, p.media_type)
+            pool = sorted(pool, key=lambda c: c.score, reverse=True)[:6]
+            collected.extend(pool)
+            # 已经拿到足够高分的候选就不必再换词了
+            if pool and pool[0].score >= _CONFIDENT:
                 break
-        if not pool:
+
+        if not collected:
             return None
-        for c in pool:
-            c.score = self.meta._score(parsed, c, p.media_type)
-        pool.sort(key=lambda c: c.score, reverse=True)
-        return pool[0]
+
+        # 去重（同一来源同一 ID 只留分数最高的）
+        best_by_id: dict = {}
+        for c in collected:
+            key = (getattr(c, "source", ""), str(getattr(c, "sid", "")))
+            cur = best_by_id.get(key)
+            if cur is None or c.score > cur.score:
+                best_by_id[key] = c
+        ranked = sorted(best_by_id.values(), key=lambda c: c.score,
+                        reverse=True)
+
+        top = ranked[0]
+        # ① 分数门槛：低于「可能相关」直接放弃，不套用错误条目
+        if top.score < _MIN_ACCEPT:
+            self._log(f"自动重搜未采用：最高分 {top.score:.2f}"
+                      f"（{top.title}）低于可信阈值 "
+                      f"{_MIN_ACCEPT:.2f}，请用右键「手动搜索」确认。")
+            return None
+        # ② 年份校验：任务有年份、候选也有年份时，差 3 年以上不接受
+        if p.year and getattr(top, "year", None):
+            try:
+                if abs(int(top.year) - int(p.year)) > 2:
+                    # 找一个年份对得上的次优候选
+                    alt = next(
+                        (c for c in ranked[1:]
+                         if c.year and abs(int(c.year) - int(p.year)) <= 2
+                         and c.score >= _MIN_ACCEPT), None)
+                    if alt is not None:
+                        return alt
+                    self._log(f"自动重搜未采用：{top.title}"
+                              f"（{top.year}）与任务年份 {p.year} 不符。")
+                    return None
+            except (TypeError, ValueError):
+                pass
+        return top
 
     def _toggle_naming_source(self) -> None:
         """勾选/取消“按此来源命名”。"""
@@ -3863,6 +3947,9 @@ class App(tk.Tk):
 
         footer = ttk.Frame(win)
         footer.pack(fill="x", padx=12, pady=(0, 10))
+        # ---- 多字幕设置区（同一集有多份字幕时才出现）----
+        self._build_multi_sub_area(win, p, tree, by_iid, footer,
+                                   refresh_count)
         ttk.Label(footer, text="默认全选；点“选”列可单独取消",
                   foreground="#777").pack(side="left")
         ttk.Label(footer, textvariable=count_var,
@@ -3875,6 +3962,131 @@ class App(tk.Tk):
         ttk.Button(footer, text="全选",
                    command=lambda: set_all(True)).pack(
                        side="right")
+
+    def _build_multi_sub_area(self, win, p: PlanItem, tree, by_iid,
+                              footer, refresh_count) -> None:
+        """预览窗口左下角：多字幕机制设置区。
+
+        三重锁：① 自动检测（已由 planner 完成，这里展示结果）
+                ② 人为确认（勾选要保留的字幕）
+                ③ 预览修改（新名称实时更新到上面的表格）
+        """
+        pending = getattr(p, "multi_subs", None) or []
+        if not pending:
+            return
+        mode = getattr(p, "multi_sub_mode", "")
+        mode_label = Planner._MULTI_SUB_MODES.get(mode, "多份字幕")
+
+        box = ttk.LabelFrame(
+            win, text=f"多字幕设置（自动检测：{mode_label}）", padding=8)
+        box.pack(fill="x", padx=12, pady=(0, 6), before=footer)
+
+        ttk.Label(
+            box,
+            text=("同一集出现多份字幕，为避免误改已暂停自动重命名。\n"
+                  "勾选要保留的字幕 → 点「按选择命名」应用到预览；"
+                  "不想要的取消勾选即可（不会删文件）。"),
+            foreground="#a15c00", justify="left", wraplength=1150).pack(
+                anchor="w", pady=(0, 6))
+
+        # 按集分组显示
+        groups: dict = {}
+        for d in pending:
+            groups.setdefault(d.get("episode"), []).append(d)
+
+        KIND_LABELS = {
+            "jp_s": "简日", "jp_t": "繁日",
+            "zh_s": "简体", "zh_t": "繁体",
+            "ja_only": "纯日语", "unknown": "未识别",
+        }
+        checks: list[tuple[dict, tk.BooleanVar]] = []
+        # 人工修改的语言标签：{原始标记(小写): 自定义显示}
+        custom_labels: dict = {}
+        for ep, items in groups.items():
+            ep_text = (f"第 {ep[1]} 集" if isinstance(ep, tuple)
+                       and ep[1] is not None else "未识别集号")
+            row = ttk.Frame(box)
+            row.pack(fill="x", pady=2)
+            ttk.Label(row, text=f"{ep_text}：", width=10).pack(side="left")
+            for d in items:
+                var = tk.BooleanVar(value=True)
+                checks.append((d, var))
+                kind = KIND_LABELS.get(d.get("kind", ""), "未识别")
+                ttk.Checkbutton(
+                    row, text=f"{kind}（{d['old_name']}）",
+                    variable=var).pack(side="left", padx=(0, 10))
+
+        act = ttk.Frame(box)
+        act.pack(fill="x", pady=(8, 0))
+
+        def _video_base_for(ep) -> str:
+            """找该集视频的新名（不含扩展名）作为字幕前缀。"""
+            for op in p.ops:
+                if op.role != "episode":
+                    continue
+                # 用视频的解析结果判断是否同一集
+                if isinstance(ep, tuple) and ep[1] is not None:
+                    m = re.search(r"S\d{2}E(\d{1,3})", op.new_name)
+                    if m and int(m.group(1)) == int(ep[1]):
+                        return op.new_name.rsplit(".", 1)[0]
+            # 兜底：用任务标题
+            return p.title or p.parsed.title
+
+        def apply_choice() -> None:
+            """把人选的字幕加入预览，并按新名字显示。"""
+            added = 0
+            for d, var in checks:
+                if not var.get():
+                    # 取消勾选：从预览里移除对应行
+                    for iid, op in list(by_iid.items()):
+                        if op.fid == d["fid"]:
+                            tree.delete(iid)
+                            by_iid.pop(iid, None)
+                            p.ops = [o for o in p.ops if o.fid != d["fid"]]
+                    continue
+                # 勾选：算出新名字并加入预览（若尚未存在）
+                old_name = d["old_name"]
+                base = _video_base_for(d.get("episode"))
+                ext = _ext_of(old_name)
+                # 字幕名 = 视频名（去规格）+ .简洁语言标记 + 扩展名
+                base = re.sub(r"\s*\[[^\]]*\]\s*$", "", base).rstrip(" .")
+                label = Planner._simple_lang_label(
+                    _stem_of(old_name), custom_labels)
+                new_name = base + (f".{label}" if label else "") + ext
+                exists = any(o.fid == d["fid"] for o in p.ops)
+                if exists:
+                    for o in p.ops:
+                        if o.fid == d["fid"]:
+                            o.new_name = new_name
+                    for iid, op in by_iid.items():
+                        if op.fid == d["fid"]:
+                            tree.set(iid, "new", new_name)
+                    continue
+                op = RenameOp(fid=d["fid"], old_name=old_name,
+                              new_name=new_name, is_dir=False,
+                              role="subtitle",
+                              parent_id=d.get("parent_id", ""))
+                p.ops.append(op)
+                iid = f"m{len(by_iid)}"
+                by_iid[iid] = op
+                tree.insert("", "end", iid=iid, values=(
+                    "☑", ROLE_LABELS.get("subtitle", "字幕"),
+                    old_name, new_name))
+                added += 1
+            refresh_count()
+            self._log(f"多字幕：已按选择处理，新增 {added} 条")
+
+        def apply_all() -> None:
+            for _d, var in checks:
+                var.set(True)
+            apply_choice()
+
+        ttk.Button(act, text="按选择命名",
+                   command=apply_choice).pack(side="left")
+        ttk.Button(act, text="全部保留并命名",
+                   command=apply_all).pack(side="left", padx=6)
+        ttk.Label(act, text="（勾掉的不改名，只保留原名）",
+                  foreground="#777").pack(side="left", padx=8)
 
     # ------------------------------------------------------------ 应用/撤销
     def _validate_ops(self, ops) -> str:

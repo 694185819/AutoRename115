@@ -756,6 +756,9 @@ class Planner:
         self.options = options or NamingOptions()
         self.log = log or (lambda s: None)
         self._nfo_cache: dict[str, dict] = {}
+        # 多字幕机制：一集有 2 份及以上字幕时，这些条目暂不重命名，
+        # 等用户在预览窗口里确认后再处理。
+        self._pending_multi_subs: list[dict] = []
 
     # ------------------------------------------------------------ 目录发现
     def _list(self, client, cid: str) -> list[P115Item]:
@@ -3710,11 +3713,43 @@ class Planner:
                                     new_name=new_name, is_dir=False,
                                     role="episode", parent_id=e.item.parent_id))
 
-        # 字幕/音轨
+        # 字幕/音轨（多字幕机制：每轮重建都重新归集）
+        self._pending_multi_subs = []
         if self.options.rename_subtitles and sidecars:
             sub_ops, sub_notes = self._sidecar_ops(sidecars, video_map)
             ops += sub_ops
             notes += sub_notes
+            # 把「待确认的多份字幕」挂到任务上，界面据此提示用户
+            if self._pending_multi_subs:
+                plan.multi_subs = list(self._pending_multi_subs)
+                modes = {d["mode"] for d in self._pending_multi_subs}
+                if len(modes) == 1:
+                    plan.multi_sub_mode = modes.pop()
+                else:
+                    # 各集模式不同时，优先报告信息量最大的那个
+                    # （triple > jp_bilingual / zh_bilingual > other）
+                    if "triple" in modes:
+                        plan.multi_sub_mode = "triple"
+                    elif "jp_bilingual" in modes or \
+                            "zh_bilingual" in modes:
+                        plan.multi_sub_mode = (
+                            "jp_bilingual" if "jp_bilingual" in modes
+                            else "zh_bilingual")
+                    else:
+                        plan.multi_sub_mode = "other"
+                eps = sorted({d["episode"] for d in
+                              self._pending_multi_subs
+                              if d["episode"][1] is not None})
+                label = self._MULTI_SUB_MODES.get(
+                    plan.multi_sub_mode, "多份字幕")
+                notes.append(
+                    f"检测到多字幕：{len(self._pending_multi_subs)} 份字幕"
+                    f"涉及第 {', '.join(str(e[1]) for e in eps)} 集"
+                    f"（{label}）。为避免误改，这些字幕暂未重命名，"
+                    "可在预览窗口确认后再处理。")
+            else:
+                plan.multi_subs = []
+                plan.multi_sub_mode = ""
 
         # 剧集文件夹
         if plan.rename_root and not plan.context.get("is_container"):
@@ -3823,13 +3858,150 @@ class Planner:
         return m.group(1) if m else ""
 
     # ------------------------------------------------------------ 字幕匹配
-    @staticmethod
-    def _lang_suffix(stem: str) -> str:
-        tags = re.findall(
-            r"(?i)([.\-_](?:zh(?:[-_]?(?:cn|tw|hans|hant))?|chs|cht|sc|tc|"
-            r"jpn?|jap|ja|eng?|gb|big5|简体|繁体|简|繁|简繁|简日|繁日|简繁日|双语|中字))"
-            r"(?=[.\-_]|$)", stem)
+    # 字幕语言标记：必须保留在文件名末尾，否则「简日 JPSC」和
+    # 「繁日 JPTC」会被改成同一个名字而互相覆盖。
+    _LANG_TAG_RE = re.compile(
+        r"(?i)[.\-_]("
+        r"jp[-_]?(?:sc|tc|chs|cht|gb|big5)"
+        r"|zh[-_]?(?:cn|tw|hans|hant|sc|tc)"
+        r"|chs|cht|sc|tc|jpn?|jap|ja|eng?|gb|big5"
+        r"|简体|繁体|简日|繁日|简繁日|简繁|简|繁|双语|中字|中英|英字"
+        r")(?=[.\-_]|$)")
+
+    @classmethod
+    def _lang_suffix(cls, stem: str) -> str:
+        """提取字幕的语言标记，保留在文件名末尾。"""
+        tags = cls._LANG_TAG_RE.findall(stem or "")
         return tags[-1] if tags else ""
+
+    # 语言标记 → 简洁中文名（优先用中文，便于一眼区分）
+    _LANG_SIMPLE = {
+        "jp_s": "简日", "jp_t": "繁日",
+        "zh_s": "简体", "zh_t": "繁体",
+        "ja_only": "日语", "unknown": "",
+    }
+    # 原始标记 → 类别（自定义语言标签时用）
+    _LANG_TAG_TO_KIND = {
+        "jpsc": "jp_s", "jps": "jp_s", "简日": "jp_s", "简繁日": "jp_s",
+        "jptc": "jp_t", "jpt": "jp_t", "繁日": "jp_t",
+        "chs": "zh_s", "sc": "zh_s", "zh-cn": "zh_s",
+        "zh-hans": "zh_s", "简": "zh_s", "简体": "zh_s",
+        "gb": "zh_s", "gbk": "zh_s",
+        "cht": "zh_t", "tc": "zh_t", "zh-tw": "zh_t",
+        "zh-hant": "zh_t", "繁": "zh_t", "繁体": "zh_t",
+        "big5": "zh_t",
+        "jpn": "ja_only", "jap": "ja_only", "ja": "ja_only",
+        "jp": "ja_only",
+    }
+
+    @classmethod
+    def _simple_lang_label(cls, stem: str,
+                           custom: Optional[dict] = None) -> str:
+        """把字幕的语言标记变成简洁中文（简日 / 繁日 / 简体 / 繁体 / 日语）。
+
+        custom 可覆盖：{原始标记: 自定义显示}，来自预览窗口的人工修改。
+        """
+        raw = cls._lang_suffix(stem)
+        if not raw:
+            return ""
+        if custom:
+            key = raw.lstrip(".-").lower()
+            for k, v in custom.items():
+                if str(k).lower() == key and v:
+                    return str(v)
+        kind = cls._subtitle_kind(stem)
+        return cls._LANG_SIMPLE.get(kind, raw.lstrip(".-"))
+
+    @classmethod
+    def _subtitle_new_name(cls, video_stem: str, old_stem: str,
+                           ext: str,
+                           custom: Optional[dict] = None) -> str:
+        """字幕文件名 = 视频名（去掉规格）+ .语言标记 + 扩展名。
+
+        要求（用户明确）：字幕名要简洁——除了与视频相同的部分，
+        只加「语言 / 双语」标记，其他一概不留
+        （不带画质规格、不带发布组、不带年份）。
+        """
+        base = str(video_stem or "")
+        # 去掉末尾的 [规格] 以及 .规格 形式
+        base = re.sub(r"\s*\[[^\]]*\]\s*$", "", base).rstrip(" .")
+        label = cls._simple_lang_label(old_stem, custom)
+        tail = f".{label}" if label else ""
+        return base + tail + str(ext or "")
+
+    # ---- 多字幕机制 --------------------------------------------------
+    # 一集有 2 份及以上字幕时，不自动勾选，交给用户确认后再重命名。
+    _MULTI_SUB_MODES = {
+        # 简日 / 繁日 双语（喵萌奶茶屋等常用 JPSC / JPTC）
+        "jp_bilingual": "简繁双语（简日 + 繁日）",
+        # 纯简繁（chs / cht / 简 / 繁）
+        "zh_bilingual": "简繁双体（简体 + 繁体）",
+        # 上面两类同时存在，还多一份纯日语
+        "triple": "三字幕（简日 / 繁日 / 纯日语）",
+        # 无法归类的多份
+        "other": "多份字幕（需人工确认）",
+    }
+
+    @classmethod
+    def _subtitle_kind(cls, stem: str) -> str:
+        """判断一份字幕属于哪一类（用于多字幕模式识别）。
+
+        返回：jp_s | jp_t | zh_s | zh_t | ja_only | unknown
+
+        注意：sc / chs / zh-Hans / 简 / 简体 都是「简体」的等价写法，
+        zh-TW / cht / 繁 都是「繁体」。同一集里出现 zh-Hans 和 sc
+        只是叫法不同，不算「多份不同字幕」。
+        """
+        tag = cls._lang_suffix(stem).lower().replace("_", "-")
+        if not tag:
+            return "unknown"
+        plain = tag.lstrip(".-")
+        # 简日 / 繁日 / JPSC / JPTC
+        if plain in ("jpsc", "jp-sc", "jps", "简日", "简繁日"):
+            return "jp_s"
+        if plain in ("jptc", "jp-tc", "jpt", "繁日"):
+            return "jp_t"
+        # 纯简 / 纯繁（等价写法归一到同一类）
+        if plain in ("chs", "sc", "zh-cn", "zh-hans", "简", "简体",
+                     "gb", "gbk"):
+            return "zh_s"
+        if plain in ("cht", "tc", "zh-tw", "zh-hant", "繁", "繁体",
+                     "big5"):
+            return "zh_t"
+        # 纯日语
+        if plain in ("jpn", "jap", "ja", "jp"):
+            return "ja_only"
+        return "unknown"
+
+    @classmethod
+    def _distinct_sub_kinds(cls, kinds: list[str]) -> set[str]:
+        """一次的多份字幕里，真正「不同」的语言有几种。"""
+        return {k for k in kinds if k != "unknown"}
+
+    @classmethod
+    def _detect_multi_sub_mode(cls, kinds: list[str]) -> str:
+        """根据一集字幕的类别，判断属于哪种多字幕模式。"""
+        s = set(kinds)
+        if {"jp_s", "jp_t"} <= s:
+            # 还多一份纯日语 → 三字幕
+            if "ja_only" in s:
+                return "triple"
+            return "jp_bilingual"
+        if {"zh_s", "zh_t"} <= s:
+            if "ja_only" in s:
+                return "triple"
+            return "zh_bilingual"
+        if "ja_only" in s and (s & {"jp_s", "jp_t", "zh_s", "zh_t"}):
+            return "triple"
+        return "other"
+
+    @staticmethod
+    def _ep_key(entry: FileEntry) -> tuple:
+        """给视频/字幕归集到「同一集」用的键。"""
+        season = entry.parsed.season
+        if season is None:
+            season = entry.folder_season
+        return (season, entry.parsed.episode)
 
     def _sidecar_ops(self, sidecars: list[FileEntry],
                      video_map: list[tuple[FileEntry, str, str]]
@@ -3844,6 +4016,9 @@ class Planner:
                 by_number.setdefault(int(e.item.stem), []).append(
                     (e, old_stem, new_stem))
         unmatched = 0
+        # 多字幕机制：先把字幕按「集」归集，再决定是自动重命名还是
+        # 交给用户确认（同一集 2 份及以上一律不自动勾选）。
+        multi_groups: dict[tuple, list] = {}
         for sub in sidecars:
             old_stem = sub.item.stem
             match = None
@@ -3938,12 +4113,43 @@ class Planner:
             if match is None:
                 unmatched += 1
                 continue
-            new_name = match[1] + suffix + sub.item.ext_raw
-            if sub.item.name != new_name:
-                ops.append(RenameOp(fid=sub.item.fid, old_name=sub.item.name,
-                                    new_name=new_name, is_dir=False,
-                                    role="subtitle",
-                                    parent_id=sub.item.parent_id))
+            # 字幕名 = 视频新名（不含扩展名）的「标题 + 集号」部分
+            #        + 副标题 + 语言标记 + 扩展名
+            # 这样简日/繁日（JPSC/JPTC）不会互相覆盖，也保留分集标题。
+            new_name = self._subtitle_new_name(
+                match[1], old_stem, sub.item.ext_raw)
+            ep_key = self._ep_key(match[0])
+            multi_groups.setdefault(ep_key, []).append(
+                (sub, old_stem, new_name))
+        # ---- 多字幕机制：同一集有多份字幕时不自动勾选 ----
+        # 单份字幕照旧自动重命名；2 份及以上一律交给用户确认，
+        # 避免把简日/繁日/纯日语混成一份或互相覆盖。
+        for ep_key, items in multi_groups.items():
+            kinds = [self._subtitle_kind(old) for _s, old, _n in items]
+            distinct = self._distinct_sub_kinds(kinds)
+            # 只有「同一份字幕被复制成多份」或「不同语言」才算多字幕。
+            # 若这一集的字幕全都归到同一种语言（如 sc 与 zh-Hans 都是
+            # 简体），按单份处理，照常重命名。
+            if len(items) == 1 or len(distinct) <= 1:
+                for sub, _old, new_name in items:
+                    if sub.item.name != new_name:
+                        ops.append(RenameOp(
+                            fid=sub.item.fid, old_name=sub.item.name,
+                            new_name=new_name, is_dir=False,
+                            role="subtitle",
+                            parent_id=sub.item.parent_id))
+                continue
+            # 多份且语言不同：只登记、不生成 op；由 UI 触发多字幕机制
+            mode = self._detect_multi_sub_mode(kinds)
+            for sub, _old, _new in items:
+                self._pending_multi_subs.append({
+                    "fid": sub.item.fid,
+                    "old_name": sub.item.name,
+                    "parent_id": sub.item.parent_id,
+                    "kind": self._subtitle_kind(_old),
+                    "episode": ep_key,
+                    "mode": mode,
+                })
         if unmatched:
             notes.append(f"{unmatched} 个字幕/音轨文件无法对应到视频，已保持原名。")
         return ops, notes

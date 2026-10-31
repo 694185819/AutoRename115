@@ -232,6 +232,10 @@ class PlanItem:
     episode_overrides: dict[str, tuple[int, int]] = field(default_factory=dict)
     # 同一集多文件的分组（多版本/疑似重复）
     version_groups: list[EpisodeVersionGroup] = field(default_factory=list)
+    # 多字幕机制：同一集有 2 份及以上字幕时，这里登记待确认的字幕，
+    # 默认不重命名（mode: jp_bilingual / zh_bilingual / triple / other）
+    multi_subs: list[dict] = field(default_factory=list)
+    multi_sub_mode: str = ""
     # 同一部剧/电影的额外版本目录：2 = V2，3 = V3…
     folder_version: int = 0
     # 当前“需确认”是否由疑似重复集触发，修正映射后可自动恢复
