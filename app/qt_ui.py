@@ -19,7 +19,7 @@ import time
 from PySide6.QtCore import (QAbstractTableModel, QObject, Qt, QTimer,
                             QUrl, Signal)
 from PySide6.QtGui import (QAction, QColor, QDesktopServices, QFont,
-                           QPixmap)
+                           QPixmap, QIcon)
 from PySide6.QtWidgets import (QAbstractItemView, QApplication,
                                QCheckBox, QComboBox, QDialog, QFormLayout,
                                QGroupBox, QHBoxLayout, QHeaderView, QLabel,
@@ -1141,6 +1141,7 @@ class MainWindow(QMainWindow):
         self.app_dir = app_dir
         self.setWindowTitle("115 海报墙重命名助手")
         self.resize(1360, 900)
+        self._set_window_icon()
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -1179,6 +1180,19 @@ class MainWindow(QMainWindow):
         self._timer.start(80)
 
     # ------------------------------------------------------------ 构建
+    def _set_window_icon(self) -> None:
+        """给窗口设置图标（资源缺失时静默跳过）。"""
+        base = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "assets")
+        for name in ("icon_256.png", "icon.ico"):
+            path = os.path.join(base, name)
+            if os.path.isfile(path):
+                try:
+                    self.setWindowIcon(QIcon(path))
+                    return
+                except Exception:      # noqa: BLE001
+                    continue
+
     def _build_toolbar(self) -> QWidget:
         bar = QWidget()
         lay = QHBoxLayout(bar)

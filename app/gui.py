@@ -386,9 +386,30 @@ class App(tk.Tk):
         except Exception:
             pass
 
+    def _apply_window_icon(self) -> None:
+        """给窗口和任务栏设置图标（资源缺失时静默跳过）。"""
+        base = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "assets")
+        ico = os.path.join(base, "icon.ico")
+        # 优先用 .ico（Windows 任务栏认它），退回 PNG
+        for path in (ico, os.path.join(base, "icon_64.png"),
+                     os.path.join(base, "icon_256.png")):
+            if not os.path.isfile(path):
+                continue
+            try:
+                if path.endswith(".ico"):
+                    self.iconbitmap(default=path)
+                else:
+                    self._icon_image = tk.PhotoImage(file=path)
+                    self.iconphoto(True, self._icon_image)
+                return
+            except Exception:      # noqa: BLE001
+                continue
+
     def _ui_window(self) -> None:
         """窗口、主题与树形控件样式。"""
         self.title(APP_TITLE)
+        self._apply_window_icon()
         # 宽度：在 1280 的基础上左右各加 5cm（按屏幕 DPI 换算）。
         # 高度：右栏内容（任务表 + 选中项详情 + 命名规则面板 + 影片资料 +
         # 运行日志）自然需要约 951px，再加上顶栏与状态栏；在屏幕允许的
