@@ -3873,8 +3873,11 @@ class App(tk.Tk):
                                  height=3).pack(fill="x")
         frame = ttk.Frame(win)
         frame.pack(fill="both", expand=True, padx=12, pady=(6, 6))
+        # 表格容器：放垂直 + 水平滚动条（新名称很长时右侧也能看全）
+        tree_wrap = ttk.Frame(frame)
+        tree_wrap.pack(fill="both", expand=True)
         cols = ("sel", "role", "old", "new")
-        tree = ttk.Treeview(frame, columns=cols, show="headings",
+        tree = ttk.Treeview(tree_wrap, columns=cols, show="headings",
                             style="Preview.Treeview")
         tree.heading("sel", text="选")
         tree.heading("role", text="类型")
@@ -3886,10 +3889,16 @@ class App(tk.Tk):
         tree.column("role", width=76, minwidth=64, stretch=False, anchor="w")
         tree.column("old", width=560, minwidth=260, stretch=True, anchor="w")
         tree.column("new", width=560, minwidth=260, stretch=True, anchor="w")
-        vs = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
-        tree.configure(yscrollcommand=vs.set)
-        tree.pack(side="left", fill="both", expand=True)
-        vs.pack(side="right", fill="y")
+        # 表格：垂直 + 水平滚动条（新名称很长时右侧内容也能看全）
+        vs = ttk.Scrollbar(tree_wrap, orient="vertical", command=tree.yview)
+        hs = ttk.Scrollbar(tree_wrap, orient="horizontal",
+                           command=tree.xview)
+        tree.configure(yscrollcommand=vs.set, xscrollcommand=hs.set)
+        tree.grid(row=0, column=0, sticky="nsew")
+        vs.grid(row=0, column=1, sticky="ns")
+        hs.grid(row=1, column=0, sticky="ew")
+        tree_wrap.rowconfigure(0, weight=1)
+        tree_wrap.columnconfigure(0, weight=1)
         by_iid: dict[str, RenameOp] = {}
         count_var = tk.StringVar()
 
