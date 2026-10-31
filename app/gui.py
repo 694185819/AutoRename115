@@ -801,6 +801,12 @@ class App(tk.Tk):
                                  variable=self.info_source_var,
                                  command=self._on_info_source_pick)
             rb.pack(side="left", padx=(8, 0))
+            # ttk.Radiobutton 点击「已经选中」的那一项时，有些平台不会
+            # 触发 command（值没变）。这里补一条鼠标事件，保证再点一次
+            # 一定能走到重搜逻辑。
+            rb.bind("<ButtonRelease-1>",
+                    lambda e, k=key: self._on_info_source_clicked(k),
+                    add="+")
             self.info_radios[key] = rb
         self._attach_info_hint(src_row)
         self.info_status = ttk.Label(src_row, text="", foreground="#777")
@@ -993,6 +999,7 @@ class App(tk.Tk):
         "nfo_clear": "_on_nfo_clear",
         "rebuild_done": "_on_rebuild_done",
         "naming_applied": "_on_naming_applied",
+        "research_source": "_on_research_source",
         "douban_test": "_on_douban_test",
     }
 
@@ -2292,6 +2299,24 @@ class App(tk.Tk):
             rb.bind("<Enter>", t.show, add="+")
             rb.bind("<Leave>", t.hide, add="+")
 
+    def _on_info_source_clicked(self, key: str) -> None:
+        """鼠标点击来源（补 command 失效的情况）。
+
+        command 在「点已选中项」时不可靠，这里统一按点击处理：
+        如果点的是当前已选中的来源 → 重搜；否则切换来源。
+        """
+        sel = self.info_source_var.get()
+        if key == sel and key == getattr(self, "_last_info_source", None):
+            # 已经是这个来源 → 再点一次表示重搜
+            p = self.detail_plan
+            if p is not None:
+                self._research_info_source(p, key)
+            return
+        # 点击的是新来源：让 command 去处理切换（避免重复执行）
+        if key != sel:
+            self.info_source_var.set(key)
+            self._on_info_source_pick()
+
     def _on_info_source_pick(self) -> None:
         """切换资料来源。
 
@@ -2316,12 +2341,25 @@ class App(tk.Tk):
         self._load_info()
 
     def _research_info_source(self, p: PlanItem, source: str) -> None:
-        """对指定来源重新搜一次（用当前任务的关键词）。"""
+        """对指定来源重新搜一次（用当前任务的关键词）。
+
+        「再点一次已选中的来源」就是这个入口。为了让用户确认真的在搜，
+        这里进入忙碌状态并在状态栏显示进度，搜索结束再恢复。
+        """
         _, _, label = self._source_candidate_for(p, source)
-        self._log(f"重新搜索 {label}：{p.title}…")
+        full_label = {"douban": "豆瓣", "bangumi": "Bangumi",
+                      "imdb": "IMDb", "tmdb": "TMDB"}.get(source, source)
+        self._log(f"重新搜索 {full_label}：{p.title}…")
         if self.busy:
             self._log("有任务在执行，稍后再试。")
             return
+
+        # 明确的进行中状态：来源状态文字 + 忙碌禁用按钮
+        try:
+            self.info_status.configure(text=f"正在重新搜索 {full_label}…",
+                                       foreground="#b26a00")
+        except Exception:      # noqa: BLE001
+            pass
 
         def task():
             try:
@@ -2337,15 +2375,23 @@ class App(tk.Tk):
             self._set_busy(False)
             if isinstance(payload, str):
                 self._log(payload)
+                try:
+                    self.info_status.configure(text="该来源无结果",
+                                               foreground="#b3261e")
+                except Exception:      # noqa: BLE001
+                    pass
                 self._load_info()
                 return
             self._apply_manual_candidate(
                 p, payload, self.meta.resolve_ids(payload, p.media_type))
-            self._log(f"已从 {label} 取回：{payload.title}")
+            self._log(f"已从 {full_label} 取回：{payload.title}"
+                      f"（{payload.year or '?'}）")
             self._render_plans()
 
-        self.run_async(task, "research_source")
+        # run_async 自己会置 busy；这里不能提前置位，否则会被当成
+        # 「上一个任务还在执行」而直接跳过。
         self._research_hook = finish
+        self.run_async(task, "research_source")
 
     @staticmethod
     def _source_candidate_for(p: PlanItem, source: str):
@@ -2566,6 +2612,15 @@ class App(tk.Tk):
 
         self.run_async(task, "naming_applied")
         self._naming_applied_hook = finish
+
+    def _on_research_source(self, payload) -> None:
+        """来源重搜完成：交给 _research_hook 收尾。"""
+        hook = getattr(self, "_research_hook", None)
+        self._research_hook = None
+        if callable(hook):
+            hook(payload)
+        else:
+            self._set_busy(False)
 
     def _on_naming_applied(self, payload) -> None:
         hook = getattr(self, "_naming_applied_hook", None)
