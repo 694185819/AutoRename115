@@ -25,6 +25,23 @@ from app.metadata import MetadataClient
 from app.models import P115Item
 from app.planner import NamingOptions, Planner
 
+# 测试里把请求限速归零：真实间隔只为避免被站点限流，
+# 回归时每集都要 sleep 会白白多花几十秒。
+_delays_zero = {"douban": 0.0, "imdb": 0.0, "bangumi": 0.0,
+                "tmdb": 0.0, "bangumi_detail": 0.0}
+
+
+def _fast_meta(*args, **kwargs):
+    """构造 MetadataClient 并把限速间隔清零（仅测试用）。"""
+    m = MetadataClient(*args, **kwargs)
+    try:
+        m.delays = dict(_delays_zero)
+        m.last_request = {k: 0.0 for k in m.delays}
+    except Exception:
+        pass
+    return m
+
+
 SHOW = "[BD-REMUX]大叔转生恶役大小姐 悪役令嬢転生おじさん"
 BASE = "Akuyaku Reijou Tensei Ojisan CheeseAni"
 
@@ -49,7 +66,7 @@ class C:
 def _run(tree, name=SHOW):
     r = mk("show", name, "jp", True)
     r.ancestors = ["动画", "2. 日本"]
-    m = MetadataClient("", use_bangumi=False, log=lambda s: None)
+    m = _fast_meta("", use_bangumi=False, log=lambda s: None)
     o = Planner(m, NamingOptions(jp_folder_style="bdremux",
                                  rename_subtitles=True))
     return o.analyze(C(tree), [r])

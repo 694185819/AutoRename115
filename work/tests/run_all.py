@@ -19,6 +19,25 @@ TIMEOUT = 300
 # 并行度：太高会互相抢网络/磁盘，导致依赖真实联网的测试偶发失败
 WORKERS = 3
 
+# 快速模式（默认）：只跑覆盖核心行为的测试，约 30 秒。
+# 需要联网、渲染窗口或构造大目录的测试放到全量模式。
+#   python run_all.py          快速（默认）
+#   python run_all.py --all    全量
+#   python run_all.py 关键字   只跑名字含关键字的
+FAST = (
+    "test_parser", "test_naming_rule", "test_planner_cases",
+    "test_subtitle_lang_marker", "test_spec_not_subtitle",
+    "test_video_first_rule", "test_subs_only_folder",
+    "test_subtitle_same_level", "test_multi_subtitle",
+    "test_folder_no_season", "test_ep_between_cjk",
+    "test_cjk_variants", "test_zero_special",
+    "test_english_none_respected", "test_no_duplicate_english",
+    "test_naming_panel_layout", "test_startup_reset",
+    "test_plan_double_click",
+    "test_preview_rename_only", "test_cache_clear",
+    "test_settings_safety",
+)
+
 RUNNER = r'''
 import sys, os
 sys.path.insert(0, r"{here}")
@@ -56,9 +75,17 @@ def run_one(name: str, env: dict) -> tuple[str, bool, float, list[str]]:
 def main() -> None:
     tests = sorted(f for f in os.listdir(HERE)
                    if f.startswith("test_") and f.endswith(".py"))
-    only = [a for a in sys.argv[1:] if not a.startswith("-")]
+    args = sys.argv[1:]
+    run_all_mode = "--all" in args
+    only = [a for a in args if not a.startswith("-")]
     if only:
         tests = [t for t in tests if any(o in t for o in only)]
+    elif not run_all_mode:
+        # 默认快速模式：只跑覆盖核心行为的测试，几十秒出结果
+        wanted = {n if n.endswith(".py") else n + ".py" for n in FAST}
+        tests = [t for t in tests if t in wanted]
+        print(f"[快速模式] 只跑 {len(tests)} 个核心测试；"
+              "要跑全部请加 --all\n")
 
     env = dict(os.environ)
     env["PYTHONIOENCODING"] = "utf-8"

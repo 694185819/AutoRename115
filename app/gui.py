@@ -338,7 +338,8 @@ class App(tk.Tk):
             rename_season_folders=bool(self.settings.get("rename_season_folders", True)),
             name_segment_source=self.settings.get("name_segment_source", "imdb"),
             subtitle_source=self.settings.get("subtitle_source", "auto"),
-            include_specs=bool(self.settings.get("include_specs", True)))
+            include_specs=bool(self.settings.get("include_specs", True)),
+            movie_style=self.settings.get("movie_style", "title_year"))
         self.planner = Planner(self.meta, self.options, log=self.log_threadsafe)
         # 主界面“命名规则”面板编辑的就是这份草稿；保存后才写回 settings。
         import copy as _copy
@@ -700,6 +701,8 @@ class App(tk.Tk):
         self.plan_tree.tag_configure("skip", foreground="#777777")
         self.plan_tree.bind("<<TreeviewSelect>>", self._plan_selected)
         self.plan_tree.bind("<Button-1>", self._plan_click)
+        # 双击任务行直接打开重命名预览（用户要求）
+        self.plan_tree.bind("<Double-1>", self._plan_dblclick)
         self.plan_tree.bind("<Button-3>", self._plan_context)
         self.plan_tree.bind("<Delete>", lambda e: self.remove_current_plan())
 
@@ -3228,6 +3231,27 @@ class App(tk.Tk):
             return
         p.selected = not p.selected
         self.plan_tree.set(iid, "sel", "☑" if p.selected else "☐")
+        return "break"
+
+    def _plan_dblclick(self, event) -> str:
+        """双击任务行 → 打开这条任务的重命名预览窗口。
+
+        「选」列留给勾选，双击它不触发预览，避免误操作。
+        """
+        if self.plan_tree.identify_column(event.x) == "#1":
+            return ""
+        iid = self.plan_tree.identify_row(event.y)
+        if not iid:
+            return ""
+        p = self._plan_by_iid(iid)
+        if p is None:
+            return ""
+        self.plan_tree.selection_set(iid)
+        self.detail_plan = p
+        try:
+            self.preview_ops()
+        except Exception as e:      # noqa: BLE001
+            self._log(f"打开预览失败：{e}")
         return "break"
 
     def select_auto(self) -> None:

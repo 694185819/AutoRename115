@@ -695,6 +695,16 @@ def parse_name(raw: str, is_dir: bool = False,
             title = pre
             full_clean = pre
 
+    # 「最终流放系列」里的「系列」是分类词，不是片名的一部分。
+    # 只有当去掉后仍有实际片名时才删，避免把「系列」本身删空。
+    # 注意：只处理「系列」。像「某合集」「全集合集」这类是真正的合集
+    # 目录标记，要留给 _is_generic_dir 判定，不能在解析阶段吞掉。
+    if is_dir and title:
+        _stripped = re.sub(
+            r"(?:\s*系列)+$", "", title).strip(" ._-–—·:：,，;；")
+        if len(_norm_text(_stripped)) >= 2:
+            title = _stripped
+
     queries: list[str] = []
 
     def add_query(q: str):

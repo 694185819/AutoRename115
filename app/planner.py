@@ -54,7 +54,9 @@ GENERIC_DIR_NAMES = {
     "日番", "番剧", "新番", "动画", "动漫", "动画片", "电视剧", "剧集",
     "电影", "影片", "美剧", "英剧", "韩剧", "日剧", "国产剧", "国产动画",
     "美漫", "美国动画", "美国动漫", "欧美动画",
-    "下载", "未分类", "其他", "合集", "视频", "媒体", "媒体库", "115",
+    "国漫", "国创", "日漫", "日动", "韩漫", "港剧", "台剧", "泰剧",
+    "纪录片", "系列", "剧场版集",
+    "下载", "未分类", "其他", "其它", "合集", "视频", "媒体", "媒体库", "115",
     "anime", "tv", "shows", "show", "movies", "movie", "downloads",
     "video", "videos", "media", "library", "others", "unsorted",
 }
@@ -460,7 +462,25 @@ def _is_generic_dir(name: str) -> bool:
         return True
     if RE_NUMBERED_CATEGORY.match(low):
         return True
-    return any(h in low for h in GENERIC_HINTS)
+    hits = [h for h in GENERIC_HINTS if h in low]
+    if not hits:
+        return False
+    # 「合集」「其他」这类词本身就是合集标记，出现即为通用目录。
+    strong = [h for h in hits
+              if h in ("合集", "其他", "其它", "新番", "番剧", "电视剧")]
+    if strong:
+        return True
+    # 「系列」这类词也可能只是作品名的一部分：
+    # 「[BD-REMUX]最终流放系列」去掉「系列」还剩「最终流放」，
+    # 是明确的片名，就不该当成通用分类目录（否则父文件夹不改名）。
+    rest = low
+    for h in hits:
+        rest = rest.replace(h, " ")
+    rest = re.sub(r"[\s\-_\[\]()（）【】·.,]+", "", rest)
+    # 还剩至少 2 个字且含中文/假名/字母 → 有实际片名
+    if len(rest) >= 2 and re.search(r"[㐀-鿿぀-ヿa-z0-9]", rest):
+        return False
+    return True
 
 
 def _titles_related(query: str, title: str) -> bool:
@@ -711,6 +731,9 @@ class NamingOptions:
     name_segment_source: str = "imdb"    # none/imdb/tmdb/douban/bangumi/local
     subtitle_source: str = "auto"        # auto/keyword/name_source/imdb/...
     include_specs: bool = True           # 是否写规格（原来的分类决定，现在可开关）
+    # 电影命名：目前只有「中文名 (年份) [ID]」一种写法，
+    # 保留字段是为了让「命名规则」面板的每行都能独立配置。
+    movie_style: str = "title_year"
 
 
 @dataclass
@@ -2796,10 +2819,35 @@ class Planner:
         """原目录/文件名里的第二语言名：日文 → 日文汉字 → 英文/罗马音。"""
         if not local:
             return ""
+        base = norm_title(plan.title)
+
+        def _core(text: str) -> str:
+            """去掉「」《》等装饰与 DIY中字/字幕 这类说明后的核心名。"""
+            t = re.sub(r"[「」『』《》〈〉\[\]()（）【】]", "", text or "")
+            t = re.sub(r"(?i)DIY|中字|字幕|简繁|双语|内封|外挂", "", t)
+            return norm_title(t)
+
         for key in ("jp", "jp_kanji", "en"):
             c = sanitize_name(local.get(key, ""), 120)
-            if c and norm_title(c) != norm_title(plan.title):
-                return c
+            if not c:
+                continue
+            nc = norm_title(c)
+            if nc == base:
+                continue
+            # 目录名是「中文名「日文名」DIY中字」这种写法时，核心内容
+            # 其实就是主标题本身，不能再当成第二语言名重复一次。
+            core = _core(c)
+            if core and base and (core in base or base in core):
+                continue
+            # 顺带去掉「DIY中字」「简繁字幕」这类版本说明
+            cleaned = re.sub(
+                r"[「」『』《》〈〉]", "", c)
+            cleaned = re.sub(
+                r"(?i)\s*(?:DIY|中字|字幕|简繁|双语|内封|外挂)"
+                r"(?:中字|字幕)?\s*", "", cleaned)
+            cleaned = cleaned.strip(" -_·.")
+            if cleaned and norm_title(cleaned) != base:
+                return cleaned
         return ""
 
     def _online_japanese_title(self, plan: PlanItem) -> str:
@@ -2868,14 +2916,32 @@ class Planner:
                 self._online_romaji_title(plan))
 
     def _episode_subtitle(self, e: FileEntry) -> str:
-        """从原始文件名里取 SxxExx 后面的单集副标题。"""
+        """从原始文件名里取 SxxExx 后面的单集副标题。
+
+        命名是「字段 + 字段 + 字段」拼出来的，副标题这一格只接受
+        **干净的文字**：规格、语言标记、发布组、方括号块一律不算。
+        拿不到干净内容就返回空，让这一格留空，绝不能把脏串带进名字。
+        """
         raw = e.item.stem
         m = re.search(
             r"(?i)(?:S\d{1,2}E\d{1,4}|E(?:P)?\d{1,4})"
             r"(?:-E?\d{1,4})?(?:v\d+)?[.\s_-]+(.+)$", raw)
         if not m:
             return ""
-        tokens = re.split(r"[.\s_]+", m.group(1))
+        rest = m.group(1)
+        # 先剥掉方括号/圆括号块，但**只剥纯规格块**（`[1080p]`、
+        # `[cht+chs+jpn]`）；括号里是中日文的属于副标题本身
+        # （例：真田小ZOO（无情澡堂 / 浅草参拜））必须保留。
+
+        def _drop_spec_bracket(mm):
+            inner = mm.group(0)[1:-1]
+            if re.search(r"[㐀-鿿぀-ヿ]", inner):
+                return mm.group(0)
+            return " "
+
+        rest = re.sub(r"[\[(（【][^\])）】]*[\])）】]", _drop_spec_bracket,
+                      rest)
+        tokens = re.split(r"[.\s_]+", rest)
         out: list[str] = []
         for tok in tokens:
             tok = tok.strip("[](){}")
@@ -2891,6 +2957,12 @@ class Planner:
             if re.fullmatch(r"(?i)(?:repack|proper|rerip|dual|multi|v\d+)",
                             tok):
                 break
+            # 语言标记（cht+chs+jpn / chs / 简体…）不是副标题
+            if re.fullmatch(
+                    r"(?i)(?:[a-z]{2,3})(?:[+&][a-z]{2,3})+"
+                    r"|chs|cht|jpn?|eng?|gb|big5|zh|简|繁|简繁|双语",
+                    tok):
+                break
             if "-" in tok:
                 base, _, suffix = tok.rpartition("-")
                 if base and suffix and suffix.isupper() and len(suffix) >= 2:
@@ -2903,7 +2975,50 @@ class Planner:
             out.pop()
         if out and len(out) <= 2 and all(t.isupper() for t in out):
             return ""
-        return " ".join(out).strip(" -._")[:120]
+        return self._clean_subtitle_field(" ".join(out).strip(" -._")[:120])
+
+    @staticmethod
+    def _clean_subtitle_field(text: str) -> str:
+        """副标题字段的最后一道校验：不像副标题就返回空串。
+
+        命名是字段拼接，每个字段都必须自身干净。这里拦掉：
+        分辨率/编码/音轨/语言标记/发布组/纯符号，以及过半是杂串的内容。
+        """
+        t = str(text or "").strip(" -._")
+        if not t:
+            return ""
+        # 残留的纯规格方括号块（含中日文的括号属于副标题，保留）
+        def _drop_spec_bracket(mm):
+            inner = mm.group(0)[1:-1]
+            if re.search(r"[㐀-鿿぀-ヿ]", inner):
+                return mm.group(0)
+            return " "
+
+        t = re.sub(r"[\[(（【][^\])）】]*[\])）】]", _drop_spec_bracket, t)
+        # 常见的规格/语言/发布组词
+        t = re.sub(
+            r"(?i)\b(?:1080p?|720p?|2160p?|480p?|4k|8k|uhd|fhd|"
+            r"bdremux|bluray|blu-ray|bdrip|web-?dl|webrip|remux|hdtv|"
+            r"x264|x265|h\.?264|h\.?265|hevc|avc|av1|10bit|8bit|hi10p|"
+            r"aac|flac|dts(?:-hd)?|truehd|atmos|ddp?|ac3|eac3|"
+            r"cht|chs|jpn?|eng?|gb|big5|dual|multi|repack|proper)\b",
+            " ", t)
+        t = re.sub(r"(?i)(?:cht|chs|jpn?|eng?)\+", " ", t)
+        t = re.sub(r"\b\d{3,4}-\w+\b", " ", t)      # 788-Remux 这类组名
+        t = re.sub(r"\s{2,}", " ", t).strip(" -._·,")
+        if not t:
+            return ""
+        # 去掉后几乎没剩下什么（例如 `1080p][BDRemux][cht+chs+jpn]`），
+        # 说明原本就不是副标题。
+        if len(t) < 2:
+            return ""
+        # 没有中日文时：至少得像个词。单个英文词也允许（例如
+        # “Subtitle”“Pilot”），但不能是纯数字/纯符号。
+        has_cjk = bool(re.search(r"[㐀-鿿぀-ヿ]", t))
+        if not has_cjk:
+            if not re.fullmatch(r"[A-Za-z][A-Za-z' \-!?.]*", t):
+                return ""
+        return t[:120]
 
     def _name_segment(self, plan: PlanItem) -> str:
         """“来源名”那一段：按设置里选的来源取。
@@ -2919,6 +3034,12 @@ class Planner:
         source = "imdb" if raw is None else str(raw).strip().lower()
         if source in ("", "none", "off", "no"):
             return ""
+        # 用户在「命名规则」里双击自定义输入的任意文字：
+        # 它不属于任何已知来源，就当作字面量直接使用，
+        # 不能被当成未知来源而走回退（否则输入「111」会被替换掉）。
+        if source not in ("imdb", "tmdb", "douban", "bangumi", "local"):
+            custom = sanitize_name(str(raw).strip(), 120)
+            return custom if custom else ""
         if source == "local":
             name = self._english_title(plan)
             # 联网拿不到英文名时，退回文件名/文件夹里能看到的英文名

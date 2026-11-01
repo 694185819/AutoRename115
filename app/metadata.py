@@ -87,11 +87,13 @@ class MetadataClient:
     def __init__(self, cache_path: str,
                  log: Optional[Callable[[str], None]] = None,
                  tmdb_key: str = "", use_bangumi: bool = True,
-                 douban_delay: float = 2.2):
+                 douban_delay: float = 2.2, offline: bool = False):
         self.cache_path = cache_path
         self.log = log or (lambda s: None)
         self.tmdb_key = (tmdb_key or "").strip()
         self.use_bangumi = use_bangumi
+        # 离线模式：所有查询直接返回空（测试用，避免真实联网拖慢回归）。
+        self.offline = bool(offline)
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": UA,
                                      "Accept": "application/json, text/plain, */*"})
@@ -186,6 +188,10 @@ class MetadataClient:
 
     def _get_json(self, url: str, source: str, params=None,
                   referer: str = "", headers=None) -> Optional[dict]:
+        if self.offline:
+            # 离线模式不发任何请求，直接当成“没有数据”，让上层走
+            # 本地兜底逻辑；回归测试用它能省掉几十秒等待。
+            raise RuntimeError("离线模式：跳过联网查询")
         self._wait(source)
         h = dict(self.session.headers)
         if referer:
@@ -202,6 +208,8 @@ class MetadataClient:
 
     # ------------------------------------------------------------ 豆瓣
     def _douban_html_search(self, query: str) -> list[Candidate]:
+        if getattr(self, "offline", False):
+            return None
         """subject_suggest 只给 1-2 季时，从豆瓣搜索页补全四季。"""
         self._wait("douban")
         r = self.session.get(
@@ -244,6 +252,8 @@ class MetadataClient:
         return out
 
     def search_douban(self, query: str) -> list[Candidate]:
+        if getattr(self, "offline", False):
+            return None
         query = query.strip()
         if not query:
             return []
@@ -661,6 +671,8 @@ class MetadataClient:
 
     def _details_douban(self, sid: str, fallback_poster: str = "",
                         kind: str = "tv") -> dict:
+        if getattr(self, "offline", False):
+            return None
         key = f"details2:douban:{sid}"
         cached = self._cache_get(key, 7 * 86400)
         if cached is not None:
@@ -784,6 +796,8 @@ class MetadataClient:
         return info
 
     def _details_imdb(self, sid: str) -> dict:
+        if getattr(self, "offline", False):
+            return None
         key = f"details:imdb:{sid}"
         cached = self._cache_get(key, 7 * 86400)
         if cached is not None:
@@ -933,6 +947,8 @@ class MetadataClient:
         return info
 
     def fetch_image(self, url: str) -> bytes:
+        if getattr(self, "offline", False):
+            return None
         if not url:
             return b""
         headers = dict(self.session.headers)
@@ -1287,6 +1303,8 @@ class MetadataClient:
         return out
 
     def _douban_episode_page(self, sid: str, season: int, ep: int) -> dict:
+        if getattr(self, "offline", False):
+            return None
         """抓一页豆瓣分集页，返回 {ok, title, reason}。
 
         豆瓣的分集页路径只按“集”编号（/episode/<N>/），季由豆瓣条目本身
