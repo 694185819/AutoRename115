@@ -710,8 +710,6 @@ class App(tk.Tk):
                                    command=self.open_manual_search)
         self.plan_menu.add_command(label="季集映射…",
                                    command=self.open_episode_mapping)
-        self.plan_menu.add_command(label="临时改名（立即生效）…",
-                                   command=self.temp_rename)
         self.plan_menu.add_command(label="预览操作", command=self.preview_ops)
         self.plan_menu.add_separator()
         self.plan_menu.add_command(label="从等待列表移除",
@@ -1011,7 +1009,6 @@ class App(tk.Tk):
         "qr_error": "_on_qr_error",
         "cookie_check": "_on_cookie_check",
         "apply": "_on_apply",
-        "temp_rename": "_on_temp_rename",
         "dir_rename": "_on_dir_rename",
         "undo": "_on_undo",
         "error": "_on_error",
@@ -1085,11 +1082,10 @@ class App(tk.Tk):
             return
         if payload:
             self._set_login_status("已登录", "#176b33")
-            # 先恢复上次等待列表，再刷新目录；恢复成功后不能再
-            # 立刻发起新的忙碌任务（会互相覆盖进度状态）。
-            if self._restore_plans():
-                return
-            self.refresh()
+            # 先恢复上次等待列表；目录刷新会在核对完成后自动补上
+            # （见 _on_plans_verified），这里不能在忙碌中再发起新任务。
+            if not self._restore_plans():
+                self.refresh()
         else:
             self._set_login_status("登录已失效", "#b3261e")
             self.open_login()
@@ -1117,6 +1113,10 @@ class App(tk.Tk):
             self._discard_plans_cache()
             self._log(f"预览缓存已作废：{reason}。请重新分析选中。")
             self.status_var.set("缓存已作废，请重新分析")
+        # 恢复流程结束后补一次目录刷新：保证左边不是空白。
+        if getattr(self, "_pending_dir_refresh", False):
+            self._pending_dir_refresh = False
+            self.refresh()
 
     def _on_qr_token(self, payload) -> None:
         dialog, token, image = payload
@@ -1285,6 +1285,10 @@ class App(tk.Tk):
 
     # ------------------------------------------------------------ 启动
     def _startup(self) -> None:
+        # 每次启动先把上一轮可能残留的忙碌/队列状态清干净。
+        # 否则「上一次任务还在执行」会让后续所有操作（刷新目录、
+        # 重新分析）都被跳过，界面卡在旧数据上。
+        self._reset_busy_state()
         if self.start_demo:
             self.enable_demo()
             return
@@ -1300,6 +1304,28 @@ class App(tk.Tk):
             self._set_login_status("未登录", "#b3261e")
             self._log("请扫码登录 115；也可以关闭登录窗口，点“演示模式”先看效果。")
             self.after(350, self._open_login_after_notice)
+
+    def _reset_busy_state(self) -> None:
+        """清掉残留的忙碌标记与排队消息。"""
+        self.busy = False
+        # 丢弃队列里没处理完的旧消息（可能是上次退出前的进度/结果）
+        try:
+            while True:
+                self.q.get_nowait()
+        except Exception:      # noqa: BLE001  queue.Empty
+            pass
+        try:
+            self.progress.stop()
+            self.progress.configure(mode="determinate", maximum=1, value=0)
+        except Exception:      # noqa: BLE001
+            pass
+        for btn in ("apply_btn", "undo_btn"):
+            w = getattr(self, btn, None)
+            if w is not None:
+                try:
+                    w.configure(state="normal")
+                except Exception:      # noqa: BLE001
+                    pass
 
     def _open_login_after_notice(self) -> None:
         """首次使用（还没有 Cookie）先提醒风控，再打开扫码窗口。"""
@@ -1437,9 +1463,10 @@ class App(tk.Tk):
         self._log(f"已切换到本地模式：{client.root}；"
                   "只重命名本机文件，不会修改 115 网盘。"
                   "分析时仍会联网查询豆瓣/Bangumi/IMDb/TMDB。")
-        if self._restore_plans():
-            return True
-        self.refresh()
+        # 恢复等待列表时，目录刷新会在核对完成后补上，
+        # 不能在这里 return，否则左边会是空白。
+        if not self._restore_plans():
+            self.refresh()
         return True
 
     def _enter_cloud(self, check_login: bool = True) -> None:
@@ -1581,8 +1608,13 @@ class App(tk.Tk):
         self._render_plans()
         self._log(f"已恢复上次的 {len(plans)} 个等待任务（本机缓存，"
                   "正在核对文件是否仍在原处…）")
-        self._set_busy(True)
+        # 恢复任务后必须把左侧目录也刷出来：否则右边有任务、
+        # 左边空白，用户连「删除任务」之外什么都点不了。
+        self._pending_dir_refresh = True
         client = self.client
+        # 注意：run_async 自己会置 busy；这里不能提前 _set_busy(True)，
+        # 否则它会判定「上一个任务还在执行」而直接跳过，导致
+        # 核对任务根本没跑、目录也永远不刷新。
         self.run_async(lambda: self._verify_plans(client),
                        "plans_verified", determinate=True)
         return True
@@ -3731,8 +3763,13 @@ class App(tk.Tk):
 
         self.rebuild_in_background(p, done)
 
-    # ------------------------------------------------------------ 临时改名
+    # ------------------------------------------------------------ 预览改名
     def temp_rename(self) -> None:
+        """预览改名：只改预览里的新名称，不碰网盘/本地文件。
+
+        真正写入请用「应用选中重命名」；这里改完只是让预览更好读，
+        或先手工敲一个名字看看效果。
+        """
         p = self.detail_plan
         if not p:
             messagebox.showinfo(APP_TITLE, "请先在右侧选择一个任务。",
@@ -3742,21 +3779,11 @@ class App(tk.Tk):
             messagebox.showinfo(APP_TITLE, "这个任务没有可改名的项目。",
                                 parent=self)
             return
-        if self.busy:
-            messagebox.showinfo(APP_TITLE, "当前有任务在执行，请稍候。",
-                                parent=self)
-            return
-        if not self.client:
-            messagebox.showinfo(
-                APP_TITLE,
-                "请先登录 115、使用演示模式，或切换到本地模式。",
-                parent=self)
-            return
-        TempRenameDialog(self, p, self._start_temp_rename)
+        TempRenameDialog(self, p, self._apply_preview_rename)
 
-    def _start_temp_rename(self, plan: PlanItem, op, new_name: str) -> None:
-        if self.busy:
-            return
+    def _apply_preview_rename(self, plan: PlanItem, op,
+                              new_name: str) -> None:
+        """把新名字写进预览（p.ops），不执行任何实际改名。"""
         clash = [o for o in plan.ops
                  if o.fid != op.fid and o.parent_id == op.parent_id and
                  o.new_name.casefold() == new_name.casefold()]
@@ -3766,81 +3793,13 @@ class App(tk.Tk):
                 f"同一目录下已经有同名目标：\n{clash[0].new_name}",
                 parent=self)
             return
-        new_op = RenameOp(fid=op.fid, old_name=op.old_name,
-                          new_name=new_name, is_dir=op.is_dir,
-                          role=op.role, parent_id=op.parent_id)
-        problem = self._validate_ops([new_op])
-        if problem:
-            messagebox.showerror(APP_TITLE, problem, parent=self)
-            return
-        client = self.client
-        self._log(f"临时改名：{op.old_name} → {new_name}")
-
-        def task():
-            results = client.rename_many(
-                [new_op],
-                progress=lambda a, b: self.post(
-                    "progress", (a, b, "正在临时改名…")))
-            return plan, op, new_op, results
-
-        self.run_async(task, "temp_rename", determinate=True)
-
-    def _after_temp_rename(self, plan: PlanItem, old_op, new_op,
-                           results) -> None:
-        self._set_busy(False)
-        ok = bool(results) and all(r.ok for r in results)
-        if not ok:
-            fail = "；".join(
-                f"{r.old_name}: {r.message}" for r in results if not r.ok)
-            self._log(f"临时改名失败：{fail}")
-            messagebox.showerror(APP_TITLE, f"临时改名失败：\n{fail}",
-                                 parent=self)
-            return
-        self.undo.record([new_op], results)
-        self._log(f"临时改名成功：{old_op.old_name} → {new_op.new_name}")
-
-        # 更新内存里的名字，避免界面继续显示旧名
-        targets = [plan.item]
-        mr = plan.context.get("mr") if isinstance(plan.context, dict) else None
-        if mr:
-            targets.append(mr.item)
-            targets += list(mr.season_dirs) + list(mr.part_dirs)
-            targets += [e.item for e in mr.entries]
-        for it in targets:
-            if it is not None and it.fid == old_op.fid:
-                it.name = new_op.new_name
-        entries = (plan.context.get("entries", [])
-                   if isinstance(plan.context, dict) else [])
-        for e in entries:
-            if e.item.fid == old_op.fid:
-                e.item.name = new_op.new_name
-
-        # 被临时改名的项目从等待任务里移除；对应字幕也一并移除，
-        # 避免之后批量应用时把字幕改成与视频不匹配的名字。
-        gone = {old_op.fid}
-        if not old_op.is_dir:
-            old_stem = os.path.splitext(old_op.new_name)[0].casefold()
-            for s in plan.ops:
-                if (s.role == "subtitle" and s.parent_id == old_op.parent_id
-                        and s.new_name.casefold().startswith(old_stem)):
-                    gone.add(s.fid)
-        plan.ops = [o for o in plan.ops if o.fid not in gone]
-
-        if plan.ops:
-            self._render_plans()
-        else:
-            self.plans = [x for x in self.plans if x is not plan]
-            self._render_plans()
-
-        # 当前正在浏览的目录/文件夹被改名时，同步路径显示
-        if old_op.is_dir and old_op.fid == self.current_cid:
-            self.path_stack[-1] = (self.current_cid, new_op.new_name)
-            self.path_label.configure(
-                text=" / ".join(name for _, name in self.path_stack))
-            if self.current_item is not None and \
-                    self.current_item.fid == old_op.fid:
-                self.current_item.name = new_op.new_name
-        self.refresh()
+        for o in plan.ops:
+            if o.fid == op.fid:
+                o.new_name = new_name
+                break
+        self._render_plans()
+        self._log(f"预览改名：{op.old_name} → {new_name}"
+                  "（仅预览，未修改文件）")
 
     def preview_ops(self) -> None:
         p = self.detail_plan
@@ -3928,13 +3887,89 @@ class App(tk.Tk):
             refresh_count()
 
         def on_click(event):
-            if tree.identify_region(event.x, event.y) == "cell" and \
-                    tree.identify_column(event.x) == "#1":
-                iid = tree.identify_row(event.y)
+            region = tree.identify_region(event.x, event.y)
+            col = tree.identify_column(event.x)
+            iid = tree.identify_row(event.y)
+            # 「选」列：切换勾选
+            if region == "cell" and col == "#1":
                 if iid in by_iid:
                     toggle(iid)
                     return "break"
+                return None
+            # 「新名称」列（#4）：单击选中；再次点同一行 → 就地编辑
+            if region == "cell" and col == "#4" and iid in by_iid:
+                if _last_click[0] == iid:
+                    start_edit(iid)
+                    return "break"
+                _last_click[0] = iid
+                return None
+            _last_click[0] = None
             return None
+
+        def on_new_header_dbl(_e=None):
+            """双击「新名称」表头：编辑当前选中行（备用入口）。"""
+            sel = tree.selection()
+            if sel and sel[0] in by_iid:
+                start_edit(sel[0])
+            return "break"
+
+        _last_click: list = [None]
+        _editor: dict = {"widget": None, "iid": None}
+
+        def _close_editor(commit: bool = False) -> None:
+            w = _editor.get("widget")
+            iid = _editor.get("iid")
+            if w is None:
+                return
+            text = w.get()
+            try:
+                w.destroy()
+            except Exception:      # noqa: BLE001
+                pass
+            _editor["widget"] = None
+            _editor["iid"] = None
+            if commit and iid in by_iid:
+                new = sanitize_name(str(text).strip(), 255)
+                op = by_iid[iid]
+                if new and new != op.new_name:
+                    # 保留原扩展名（与原逻辑一致）
+                    if not op.is_dir:
+                        old_ext = os.path.splitext(op.old_name)[1]
+                        if old_ext and not os.path.splitext(new)[1]:
+                            new += old_ext
+                    op.new_name = new
+                    tree.set(iid, "new", new)
+                    self._log(f"预览改名：{op.old_name} → {new}"
+                              "（仅预览，未修改文件）")
+            tree.focus_set()
+
+        def start_edit(iid: str) -> None:
+            """在「新名称」单元格上就地打开输入框。"""
+            op = by_iid.get(iid)
+            if op is None:
+                return
+            _close_editor(commit=False)
+            bbox = tree.bbox(iid, "new")
+            if not bbox:
+                return
+            x, y, w, h = bbox
+            entry = ttk.Entry(tree)
+            entry.insert(0, op.new_name)
+            entry.select_range(0, "end")
+            entry.place(x=x, y=y, width=max(w, 120), height=h)
+            entry.focus_set()
+            _editor["widget"] = entry
+            _editor["iid"] = iid
+            entry.bind("<Return>",
+                       lambda e: (_close_editor(commit=True), "break")[1])
+            entry.bind("<Tab>",
+                       lambda e: (_close_editor(commit=True), "break")[1])
+            entry.bind("<Escape>",
+                       lambda e: (_close_editor(commit=False), "break")[1])
+            entry.bind("<FocusOut>",
+                       lambda e: _close_editor(commit=True))
+
+        tree.bind("<Double-1>", on_new_header_dbl, add="+")
 
         def on_space(event):
             for iid in tree.selection():
@@ -3964,7 +3999,8 @@ class App(tk.Tk):
         # ---- 多字幕设置区（同一集有多份字幕时才出现）----
         self._build_multi_sub_area(win, p, tree, by_iid, footer,
                                    refresh_count)
-        ttk.Label(footer, text="默认全选；点“选”列可单独取消",
+        ttk.Label(footer,
+                  text="点“选”列勾选；点一次「新名称」选中，再点同一行可就地改名",
                   foreground="#777").pack(side="left")
         ttk.Label(footer, textvariable=count_var,
                   foreground="#176b33").pack(side="left", padx=12)
@@ -4060,7 +4096,9 @@ class App(tk.Tk):
             holder, height=est_rows * 26)
         scroll_holder.pack(fill="x", expand=False)
 
-        # 按集分组显示
+        # 按集分组显示：每份字幕独占一行，避免横向溢出
+        # （以前一集两份并排，第 9 集之后挤不下会掉到下一行，
+        #   表现为右侧出现孤立的「简体」复选框）
         groups: dict = {}
         for d in pending:
             groups.setdefault(d.get("episode"), []).append(d)
@@ -4076,23 +4114,28 @@ class App(tk.Tk):
         for ep, items in groups.items():
             ep_text = (f"第 {ep[1]} 集" if isinstance(ep, tuple)
                        and ep[1] is not None else "未识别集号")
-            row = ttk.Frame(box)
-            row.pack(fill="x", pady=2)
-            ttk.Label(row, text=f"{ep_text}：", width=10).pack(side="left")
+            grp = ttk.Frame(box)
+            grp.pack(fill="x", pady=(4, 0))
+            ttk.Label(grp, text=f"{ep_text}",
+                      font=("Microsoft YaHei UI", 9, "bold")).pack(
+                          anchor="w")
             for d in items:
                 var = tk.BooleanVar(value=True)
                 checks.append((d, var))
                 kind = KIND_LABELS.get(d.get("kind", ""), "未识别")
+                # 去掉冗长的发布组前缀，只保留「集号+语言+文件名要点」
+                short = d["old_name"]
+                row = ttk.Frame(grp)
+                row.pack(fill="x", padx=(16, 0))
                 cb = ttk.Checkbutton(
-                    row, text=f"{kind}（{d['old_name']}）",
-                    variable=var)
-                cb.pack(side="left", padx=(0, 10))
+                    row, text=f"{kind}  {short}", variable=var)
+                cb.pack(anchor="w")
                 # 鼠标滚轮在复选框上也能滚动列表
                 cb.bind("<MouseWheel>", lambda e, c=_canvas: (
                     c.yview_scroll(-1 if e.delta > 0 else 1, "units"),
                     "break")[1])
 
-        # 按钮固定在 holder 上（不随滚动区滚走）
+# 按钮固定在 holder 上（不随滚动区滚走）
         act_holder = ttk.Frame(holder)
         act_holder.pack(fill="x", pady=(8, 0))
 
@@ -5003,6 +5046,44 @@ class QQChannelDialog(tk.Toplevel):
 
 
 class SettingsDialog(tk.Toplevel):
+    def _refresh_cache_info(self) -> None:
+        """显示当前缓存条目数，让用户知道点按钮会清掉多少。"""
+        try:
+            cache = getattr(self.app.meta, "cache", None)
+            n = len(cache or {})
+            self._cache_info_var.set(f"当前 {n} 条")
+        except Exception:      # noqa: BLE001
+            try:
+                self._cache_info_var.set("")
+            except Exception:      # noqa: BLE001
+                pass
+
+    def _clear_metadata_cache(self) -> None:
+        """清空元数据缓存，下次分析会重新联网获取。
+
+        缓存默认保留 7 天。如果某条目在外站被改动过（例如被恶意篡改
+        后又改回），软件会一直读旧缓存，这时需要手动丢掉。
+        """
+        if not messagebox.askyesno(
+                APP_TITLE,
+                "将清除所有元数据缓存（豆瓣/Bangumi/IMDb/TMDB 的"
+                "查询结果），下次分析会重新联网获取。\n\n"
+                "登录状态、命名规则等设置不受影响。继续吗？",
+                parent=self):
+            return
+        try:
+            meta = self.app.meta
+            meta.cache = {}
+            save = getattr(meta, "save_cache", None)
+            if callable(save):
+                save()
+            self._refresh_cache_info()
+            self.app._log("元数据缓存已清除，下次分析将重新联网获取。")
+            messagebox.showinfo(APP_TITLE, "已清除。请重新分析目录。",
+                                parent=self)
+        except Exception as e:      # noqa: BLE001
+            messagebox.showerror(APP_TITLE, f"清除失败：{e}", parent=self)
+
     def __init__(self, app: App):
         super().__init__(app)
         self.app = app
@@ -5057,6 +5138,18 @@ class SettingsDialog(tk.Toplevel):
             frame,
             text="记住上次分析结果（重启后直接恢复等待列表，自动核对文件）",
             variable=self.vars["remember_plans"]).pack(anchor="w", pady=3)
+        # 元数据缓存管理：缓存默认 7 天，字段被外部改动（例如条目
+        # 信息被篡改后又被改回）时，需要能手动丢弃重新获取。
+        cache_row = ttk.Frame(frame)
+        cache_row.pack(anchor="w", pady=(6, 3))
+        ttk.Label(cache_row, text="元数据缓存").pack(side="left")
+        ttk.Button(cache_row, text="清除缓存并重新获取…",
+                   command=self._clear_metadata_cache).pack(
+                       side="left", padx=8)
+        self._cache_info_var = tk.StringVar()
+        ttk.Label(cache_row, textvariable=self._cache_info_var,
+                  foreground="#777").pack(side="left")
+        self._refresh_cache_info()
         nfo_row = ttk.Frame(frame)
         nfo_row.pack(anchor="w", pady=3)
         ttk.Label(nfo_row, text="已有 NFO/图片").pack(side="left")
@@ -5350,7 +5443,7 @@ class DirRenameDialog(tk.Toplevel):
         btns.pack(fill="x")
         ttk.Label(btns, text="文件的扩展名不能修改。",
                   foreground="#777").pack(side="left")
-        ttk.Button(btns, text="立即改名",
+        ttk.Button(btns, text="应用到预览",
                    command=self._submit).pack(side="right")
         ttk.Button(btns, text="取消",
                    command=self.destroy).pack(side="right", padx=6)
@@ -5412,7 +5505,7 @@ class TempRenameDialog(tk.Toplevel):
         self.on_submit = on_submit
         self.ops = list(plan.ops)
         self.by_iid = {}
-        self.title("临时改名（立即生效）")
+        self.title("预览改名（仅预览，不改文件）")
         self.geometry("820x450")
         self.minsize(720, 380)
         self.transient(app)
@@ -5459,9 +5552,9 @@ class TempRenameDialog(tk.Toplevel):
 
         btns = ttk.Frame(self, padding=(12, 4, 12, 10))
         btns.pack(fill="x")
-        ttk.Label(btns, text="文件会保留原扩展名。",
+        ttk.Label(btns, text="只改预览里的新名称；实际改名请用「应用选中重命名」。",
                   foreground="#777").pack(side="left")
-        ttk.Button(btns, text="立即改名",
+        ttk.Button(btns, text="应用到预览",
                    command=self._submit).pack(side="right")
         ttk.Button(btns, text="取消",
                    command=self.destroy).pack(side="right", padx=6)
@@ -5483,11 +5576,11 @@ class TempRenameDialog(tk.Toplevel):
         sel = self.tree.selection()
         op = self.by_iid.get(sel[0]) if sel else None
         if not op:
-            messagebox.showinfo("临时改名", "请先选中一项。", parent=self)
+            messagebox.showinfo("预览改名", "请先选中一项。", parent=self)
             return
         new = sanitize_name(self.name_var.get().strip(), 255)
         if not new or new in (".", ".."):
-            messagebox.showerror("临时改名", "名称不能为空。", parent=self)
+            messagebox.showerror("预览改名", "名称不能为空。", parent=self)
             return
         if not op.is_dir:
             old_ext = os.path.splitext(op.old_name)[1]
@@ -5496,7 +5589,7 @@ class TempRenameDialog(tk.Toplevel):
                 new += old_ext
             elif old_ext and new_ext.lower() != old_ext.lower():
                 messagebox.showerror(
-                    "临时改名",
+                    "预览改名",
                     "115 不允许修改扩展名。\n"
                     f"原扩展名：{old_ext}\n新扩展名：{new_ext}",
                     parent=self)
@@ -5504,11 +5597,11 @@ class TempRenameDialog(tk.Toplevel):
         if any(o.fid != op.fid and o.parent_id == op.parent_id and
                o.new_name.casefold() == new.casefold()
                for o in self.plan.ops):
-            messagebox.showerror("临时改名", "同一目录下已经有同名目标。",
+            messagebox.showerror("预览改名", "同一目录下已经有同名目标。",
                                  parent=self)
             return
         if not messagebox.askyesno(
-                "临时改名",
+                "预览改名",
                 f"将在 115 上立即改名：\n\n{op.old_name}\n→ {new}\n\n"
                 "只改这一项，不删除、不移动。继续？",
                 parent=self):

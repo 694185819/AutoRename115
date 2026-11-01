@@ -1550,8 +1550,19 @@ class Planner:
             plans: list[PlanItem] = []
             groups: dict[str, list[FileEntry]] = {}
             for e in videos:
-                key = norm_title(e.parsed.title) or \
-                    norm_title(strip_season_markers(folder_title)) or "unknown"
+                # 特别篇（S00Exx）的文件名里往往直接写着单集副标题
+                # （例：「S00E16 關於「沙漠的パスタ大作戦」Youjo Senki - …
+                # 」，解析出的 title 与正片完全不同）。这类文件必须按
+                # 目录标题归组，否则会被当成「另一部作品」而漏掉。
+                is_special = (e.parsed.season == 0 or
+                              e.folder_season == 0)
+                if is_special:
+                    key = norm_title(strip_season_markers(
+                        folder_title)) or "unknown"
+                else:
+                    key = (norm_title(e.parsed.title) or
+                           norm_title(strip_season_markers(folder_title)) or
+                           "unknown")
                 groups.setdefault(key, []).append(e)
             # 同一部剧的季号变体（“X”与“X 第二季”/“X 第四季”）只是
             # 文件名写法不同，按标题分组会把文件夹拆散；这里合并成一组。
@@ -3781,8 +3792,19 @@ class Planner:
             ext = e.item.ext_raw
             subtitle = ""
             if category in DOTTED_CATEGORIES or category == "jp_anime":
-                subtitle = (self._episode_subtitle(e) or
-                            online_subs.get((season, ep), ""))
+                # 网站（TMDb/所选来源）的分集名优先；只有网站没有时才
+                # 退回原文件名里的副标题。原文件名常混着罗马音、日文
+                # 原名和发布组信息（例：S00E16 關於「沙漠的パスタ大作戦」
+                # Youjo Senki - Sabaku no Pasta…），不如站点标题规范。
+                # 例外：副标题设置成「只取原文件名里的标题」时不联网。
+                only_keyword = str(
+                    getattr(self.options, "subtitle_source", "auto")
+                    or "auto") == "keyword"
+                if only_keyword:
+                    subtitle = self._episode_subtitle(e)
+                else:
+                    subtitle = (online_subs.get((season, ep), "") or
+                                self._episode_subtitle(e))
                 if season == 0 and subtitle:
                     subtitle = self._clean_special_subtitle(plan, subtitle)
             version_no = analysis.version_numbers.get(e.item.fid, 0)

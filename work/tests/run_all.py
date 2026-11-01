@@ -17,7 +17,7 @@ ROOT = os.path.dirname(os.path.dirname(HERE))
 PY = os.path.join(ROOT, ".venv", "Scripts", "python.exe")
 TIMEOUT = 300
 # 并行度：太高会互相抢网络/磁盘，导致依赖真实联网的测试偶发失败
-WORKERS = 4
+WORKERS = 3
 
 RUNNER = r'''
 import sys, os
