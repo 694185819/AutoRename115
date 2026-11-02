@@ -85,18 +85,16 @@ def main():
     assert plan.status == "auto", plan.status
     by_old = {op.old_name: op.new_name for op in plan.ops}
     assert "S00E01" in by_old[f"{SHOW} S1E00.m2ts"]
+    # S1E00.zh-Hans.ass 与视频同层（在根目录）：正常改名
     sub = by_old[f"{SHOW} S1E00.zh-Hans.ass"]
-    # 字幕语言标记统一成简洁中文（zh-Hans → 简体）
     assert "S00E01" in sub and sub.endswith(".简体.ass"), sub
     iso = next(v for k, v in by_old.items() if k.endswith(".iso"))
     assert "S00E02" in iso, iso
     assert "S01E01" in by_old[f"{SHOW} S1E01.m2ts"]
-    sub_ops = {op.old_name: op.new_name for op in plan.ops
-               if op.role == "subtitle"}
-    zero_sub = next(v for k, v in sub_ops.items() if " 00 (" in k)
-    main_sub = next(v for k, v in sub_ops.items() if " 01 (" in k)
-    assert "S00E01" in zero_sub and zero_sub.endswith(".简体.sup"), zero_sub
-    assert "S01E01" in main_sub and main_sub.endswith(".简体.sup"), main_sub
+    # 「字幕/」子目录里的字幕（.sup）一律不改名（用户明确要求）
+    sub_ops = [op.old_name for op in plan.ops if op.role == "subtitle"]
+    print("改名的字幕:", sub_ops)
+    assert not any(n.endswith(".sup") for n in sub_ops), sub_ops
     assert "第 0 集" in plan.note, plan.note
     assert "唯一剩余" in plan.note, plan.note
     assert "集号是 0" not in plan.note, plan.note
