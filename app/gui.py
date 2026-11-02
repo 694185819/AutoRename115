@@ -857,6 +857,11 @@ class App(tk.Tk):
         self.info_poster = tk.Label(poster_box, text="封面",
                                     background="#f0f0f0", foreground="#999")
         self.info_poster.pack(fill="both", expand=True)
+        # 点击封面 → 用默认浏览器打开该条目页；鼠标移入显示跟随提示。
+        self.info_poster.bind("<Button-1>", self._poster_click)
+        self.info_poster.bind("<Enter>", self._poster_enter)
+        self.info_poster.bind("<Motion>", self._move_follow_tip)
+        self.info_poster.bind("<Leave>", self._poster_leave)
         self._info_photo = None
 
         text_box = ttk.Frame(body)
@@ -2842,6 +2847,99 @@ class App(tk.Tk):
             except Exception:
                 pass
         self.info_poster.configure(image="", text="封面")
+
+    # ------------------------------------------------------------ 封面跳转
+    @staticmethod
+    def _source_page_url(p: PlanItem, source: str) -> str:
+        """根据资料源和条目编号拼出可打开的网页地址。"""
+        sid, kind, _fb = App._info_source_details(p, source)
+        sid = str(sid or "").strip()
+        if not sid:
+            return ""
+        if source == "douban":
+            return f"https://movie.douban.com/subject/{sid}/"
+        if source == "bangumi":
+            return f"https://bgm.tv/subject/{sid}"
+        if source == "imdb":
+            return (f"https://www.imdb.com/title/{sid}/" if sid.startswith("tt")
+                    else f"https://www.imdb.com/find/?q={sid}")
+        if source == "tmdb":
+            return f"https://www.themoviedb.org/{kind}/{sid}"
+        return ""
+
+    def _current_poster_url(self) -> str:
+        """当前封面所示条目对应的网页。"""
+        p = self.detail_plan
+        if not p:
+            return ""
+        return self._source_page_url(p, self.info_source_var.get() or "")
+
+    def _poster_click(self, _event=None) -> None:
+        url = self._current_poster_url()
+        if not url:
+            self._log("这张封面没有可跳转的条目链接。")
+            return
+        try:
+            webbrowser.open(url)
+            self._log(f"已在浏览器打开：{url}")
+        except Exception as e:      # noqa: BLE001
+            messagebox.showerror(APP_TITLE,
+                                 f"打开浏览器失败：{e}", parent=self)
+
+    def _poster_enter(self, event=None) -> None:
+        """鼠标进入封面：换手型光标并跟随移动显示提示。"""
+        try:
+            self.info_poster.configure(cursor="hand2")
+        except Exception:      # noqa: BLE001
+            pass
+        self._move_follow_tip(event)
+
+    def _poster_leave(self, _event=None) -> None:
+        try:
+            self.info_poster.configure(cursor="")
+        except Exception:      # noqa: BLE001
+            pass
+        self._hide_follow_tip()
+
+    def _move_follow_tip(self, event=None) -> None:
+        """在鼠标右下方显示/移动「点击跳转网页」小提示。"""
+        if event is None:
+            return
+        if getattr(self.info_poster, "cget", None) is None:
+            return
+        # 没有可跳转链接时不提示
+        if not self._current_poster_url():
+            self._hide_follow_tip()
+            return
+        tip = getattr(self, "_follow_tip", None)
+        try:
+            if tip is None or not tip.winfo_exists():
+                tip = tk.Toplevel(self)
+                tip.wm_overrideredirect(True)
+                try:
+                    tip.attributes("-topmost", True)
+                except Exception:      # noqa: BLE001
+                    pass
+                tk.Label(tip, text="点击跳转网页", justify="left",
+                         background="#ffffe1", foreground="#333",
+                         relief="solid", borderwidth=1,
+                         font=("Microsoft YaHei UI", 9),
+                         padx=6, pady=2).pack()
+                self._follow_tip = tip
+            tip.wm_geometry(f"+{event.x_root + 14}+{event.y_root + 16}")
+            tip.deiconify()
+        except Exception:      # noqa: BLE001
+            self._follow_tip = None
+
+    def _hide_follow_tip(self) -> None:
+        tip = getattr(self, "_follow_tip", None)
+        self._follow_tip = None
+        if tip is not None:
+            try:
+                tip.destroy()
+            except Exception:      # noqa: BLE001
+                pass
+
 
     def _load_info(self) -> None:
         p = self.detail_plan
