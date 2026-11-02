@@ -746,6 +746,11 @@ class App(tk.Tk):
                    command=self.open_manual_search).pack(side="left", padx=4)
         ttk.Button(row, text="预览操作",
                    command=self.preview_ops).pack(side="left", padx=4)
+        # 条目信息在外站被恶意篡改过时，重新搜索会命中旧缓存；
+        # 这个按钮只丢弃「当前这部剧」的缓存，不影响其它剧。
+        ttk.Button(row, text="清除此剧缓存",
+                   command=self.forget_current_cache).pack(
+                       side="left", padx=4)
         self.meta_label = ttk.Label(detail, text="", foreground="#555")
         self.meta_label.pack(fill="x", pady=(4, 0))
         # 顺序：元信息 → 季集映射 → 备注。
@@ -3336,6 +3341,56 @@ class App(tk.Tk):
                 APP_TITLE,
                 "没有可用的上次分析结果。\n可能是刚改过名、撤回过，"
                 "或者换过账号/文件夹。请重新分析。", parent=self)
+
+    def forget_current_cache(self) -> None:
+        """只丢掉「当前这部剧」的元数据缓存，然后重新分析。
+
+        用于条目在外站被恶意改成广告内容、软件又抓到了旧缓存的情况：
+        站点改回正常后，软件仍读缓存；这里精确丢弃该条目相关的缓存，
+        不影响其它剧的结果。
+        """
+        p = self.detail_plan
+        if not p:
+            messagebox.showinfo(APP_TITLE, "请先在右侧选择一个任务。",
+                                parent=self)
+            return
+        # 收集能定位到这个条目的所有标识
+        needles: list[str] = []
+        for attr in ("imdb_id", "tmdb_id", "douban_id", "bangumi_id"):
+            v = str(getattr(p.match, attr, "") or "").strip()
+            if v:
+                needles.append(v)
+        title = str(p.title or "").strip()
+        if title:
+            needles.append(title)
+        orig = str(getattr(p.match, "title_original", "") or "").strip()
+        if orig:
+            needles.append(orig)
+        if not needles:
+            messagebox.showinfo(
+                APP_TITLE, "这部剧还没有可定位的条目编号或标题，"
+                "请在设置里清除全部缓存。", parent=self)
+            return
+        if not messagebox.askyesno(
+                APP_TITLE,
+                f"将清除「{title or p.item.name}」的元数据缓存，"
+                "然后重新联网获取。\n\n"
+                "只影响这一部剧，其它剧的缓存保留。继续吗？",
+                parent=self):
+            return
+        try:
+            n = self.meta.forget(*needles)
+        except Exception as e:      # noqa: BLE001
+            messagebox.showerror(APP_TITLE, f"清除失败：{e}", parent=self)
+            return
+        self._log(f"已清除该剧的 {n} 条缓存（{'、'.join(needles[:4])}…），"
+                  "正在重新分析…")
+        if n == 0:
+            messagebox.showinfo(
+                APP_TITLE,
+                "没有找到这部剧的缓存记录（可能本来就未缓存）。"
+                "将直接重新分析。", parent=self)
+        self.analyze_current()
 
     def rebuild_detail(self) -> None:
         p = self.detail_plan

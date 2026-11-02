@@ -630,6 +630,15 @@ def _usable_query(q: str) -> bool:
         return False
     if _is_meaningless_title(q):
         return False
+    # 纯发布组/规格标记不是片名：目录名只剩「BD-REMUX」「BluRay」
+    # 「WEB-DL」这类标签时，拿它去搜只会白费一次请求。
+    if re.fullmatch(
+            r"(?i)(?:bd(?:rip|remux|mv|iso)?|bd-?remux|web-?dl|webrip|"
+            r"blu-?ray|uhd|4k|8k|\d{3,4}p|hdr(?:10\+?)?|dolby|dv|"
+            r"hevc|avc|x26[45]|h\.?26[45]|10bit|8bit|hi10p|"
+            r"aac|ac3|eac3|flac|dts(?:-hd)?|truehd|atmos|opus|mp3|"
+            r"remux|bdmv)", q.strip()):
+        return False
     return not _is_format_descriptor(q)
 
 def _mostly_same_words(a: str, b: str) -> bool:
@@ -2862,16 +2871,35 @@ class Planner:
                 self._online_romaji_title(plan))
 
     def _episode_subtitle(self, e: FileEntry) -> str:
-        """从原始文件名里取 SxxExx 后面的单集副标题。
+        """从原始文件名里取集号后面的单集副标题。
 
         命名是「字段 + 字段 + 字段」拼出来的，副标题这一格只接受
         **干净的文字**：规格、语言标记、发布组、方括号块一律不算。
         拿不到干净内容就返回空，让这一格留空，绝不能把脏串带进名字。
+
+        支持的集号写法：
+          - 西方：S01E01 / E01 / EP01
+          - 中文：第01集 / 第1话
+          - 日式：第01話 / 第1話 / 01話
+        日式写法后面常直接跟「副标题」，例如
+        「かのこん 第01話 「初めてしちゃう？」」。
         """
         raw = e.item.stem
         m = re.search(
             r"(?i)(?:S\d{1,2}E\d{1,4}|E(?:P)?\d{1,4})"
             r"(?:-E?\d{1,4})?(?:v\d+)?[.\s_-]+(.+)$", raw)
+        if not m:
+            # 中文/日式集号：第01話、第1话、第01集、第1回
+            m = re.search(
+                r"第\s*\d{1,4}\s*[話话集回幕]"
+                r"[\s.．、,，:：_\-]*"
+                r"(「.+?」|『.+?』|【.+?】|\[[^\]]*[㐀-鿿぀-ヿ][^\]]*\]"
+                r"|.+)$", raw)
+        if not m:
+            # 纯数字 + 副标题（01 副标题）
+            m = re.search(
+                r"(?:^|[\s._-])\d{1,4}[\s._-]+"
+                r"(「.+?」|『.+?』|.+)$", raw)
         if not m:
             return ""
         rest = m.group(1)
@@ -2903,10 +2931,10 @@ class Planner:
             if re.fullmatch(r"(?i)(?:repack|proper|rerip|dual|multi|v\d+)",
                             tok):
                 break
-            # 语言标记（cht+chs+jpn / chs / 简体…）不是副标题
+            # 语言标记（cht+chs+jpn / chs / sc / 简体…）不是副标题
             if re.fullmatch(
                     r"(?i)(?:[a-z]{2,3})(?:[+&][a-z]{2,3})+"
-                    r"|chs|cht|jpn?|eng?|gb|big5|zh|简|繁|简繁|双语",
+                    r"|chs|cht|sc|tc|jpn?|eng?|gb|big5|zh|简|繁|简繁|双语",
                     tok):
                 break
             if "-" in tok:
@@ -3749,12 +3777,9 @@ class Planner:
             sub_source, sub_sid = self.subtitle_ref(
                 plan, name_source, name_sid)
             for s in seasons:
-                missing = any(
-                    not self._episode_subtitle(e)
-                    for e, ss, ep, _, _ in resolved
-                    if ss == s and ep is not None)
-                if not missing:
-                    continue
+                # 是否联网只由「副标题」设置决定，**不能**因为文件名里
+                # 已经有副标题就跳过——那样选了 TMDB/豆瓣 也永远拿不到
+                # 站点的分集名（曾在日式集号能正常提取后暴露）。
                 if str(getattr(self.options, "subtitle_source", "auto")
                        or "auto") == "keyword":
                     # 只用文件名里的标题，不联网补

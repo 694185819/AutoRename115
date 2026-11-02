@@ -43,6 +43,39 @@ from .textnorm import (  # noqa: E402  （放在常量之后，保持原文件�
     titles_agree,
 )
 
+
+def _alias_belongs(alias: str, *anchors: str) -> bool:
+    """别名是否属于这些标题里的同一部作品。
+
+    用于决定「能不能拿这个别名去别的站点搜索」。Bangumi 条目的 aliases
+    常混进同系列衍生物、其他季，甚至编辑错误的无关名称；无校验地拿去
+    搜索会浪费大量请求，还可能搜回完全无关的条目。
+
+    判定：与任一 anchor 大致相同，或一方包含另一方且长度接近。
+    """
+    a = str(alias or "").strip()
+    if not a:
+        return False
+    na = norm_title(a)
+    if not na:
+        return False
+    for raw in anchors:
+        t = str(raw or "").strip()
+        if not t:
+            continue
+        nt = norm_title(t)
+        if not nt:
+            continue
+        if titles_agree(a, t):
+            return True
+        # 包含关系也要长度接近，避免「无名记忆」被
+        # 「无名记忆 第二季 特别篇总集」这种长名字带偏。
+        if na in nt or nt in na:
+            ratio = min(len(na), len(nt)) / max(len(na), len(nt))
+            if ratio >= 0.6:
+                return True
+    return False
+
 # 中文里常被混用、且各站搜索不视为同一字的异体/形近字对。
 # 只放「互换后仍是同一部作品」的高频组合，避免引入无关结果。
 _CJK_SWAPS = [
@@ -178,6 +211,33 @@ class MetadataClient:
 
     def _cache_put(self, key: str, data) -> None:
         self.cache[key] = {"t": time.time(), "data": data}
+
+    def forget(self, *needles: str) -> int:
+        """丢掉与给定关键字相关的缓存条目，返回删除数量。
+
+        场景：某个条目在豆瓣/TMDB 上被恶意改成广告信息，软件抓到并缓存
+        了；之后站点改回正常，但缓存还在（默认 7 天），界面一直显示旧
+        内容。这里按条目编号/标题精确丢弃，不影响其它剧的缓存。
+
+        无参数时清空全部缓存。
+        """
+        if not needles:
+            n = len(self.cache)
+            self.cache = {}
+            self.save_cache()
+            return n
+        keys = [str(x).strip().lower() for x in needles if str(x).strip()]
+        if not keys:
+            n = len(self.cache)
+            self.cache = {}
+            self.save_cache()
+            return n
+        drop = [k for k in self.cache if any(x in k.lower() for x in keys)]
+        for k in drop:
+            del self.cache[k]
+        if drop:
+            self.save_cache()
+        return len(drop)
 
     def _wait(self, source: str) -> None:
         delay = self.delays[source]
@@ -1960,8 +2020,13 @@ class MetadataClient:
             return queries, pools
 
         bangumi_all = pools["bangumi"]
+        # 搜索追溯：把「本次用哪些词、去了哪些站点」写进日志。
+        # 这样用户能直接看到搜索起点，而不是靠猜。
+        self.log(f"搜索起点：{parsed.title!r}"
+                 f"；本轮候选词 {queries}")
         if self.use_bangumi:
             for q in queries[:2]:
+                self.log(f"搜索 Bangumi：{q!r}")
                 bangumi_all += self.search_bangumi(q)
         for c in bangumi_all:
             c.score = self._score(parsed, c, media_type)
@@ -1977,9 +2042,17 @@ class MetadataClient:
             for t in (b.original_title, b.title):
                 if t:
                     imdb_queries.append(t)
+            # 别名必须与本剧相关才用来扩展搜索词。
+            # Bangumi 条目的 aliases 里常混着同系列其它作品、衍生作，
+            # 甚至编辑错误的无关名称；以前无校验地拿去搜 IMDb，
+            # 会把毫不相干的作品名当成搜索词。
             for a in (b.extra.get("aliases") or [])[:4]:
-                if a:
-                    imdb_queries.append(a)
+                if not a:
+                    continue
+                if not _alias_belongs(a, parsed.title, b.title,
+                                      b.original_title):
+                    continue
+                imdb_queries.append(a)
             if b.title and RE_CJK.search(b.title):
                 # 豆瓣用中文名最好找；把可靠的 Bangumi 中文名提到前面，
                 # 并补上“第N季”，否则英文名/无季号查询只能搜到残缺季。
@@ -1990,19 +2063,46 @@ class MetadataClient:
                 douban_queries.append(b.title)
 
         douban_all = pools["douban"]
-        for q in _dedupe_str(douban_queries)[:4]:
+        # 同一个基础名的「季号变体」不会比基础名更容易搜到：
+        # 「无名记忆」都搜空时，「无名记忆 第一季」几乎必然也空。
+        # 基础名搜空后直接跳过它的变体，换下一个不同写法的名字。
+        _failed_bases: set[str] = set()
+        for q in _dedupe_str(douban_queries)[:3]:
+            _base_key = norm_title(strip_season_markers(q))
+            if _base_key and _base_key in _failed_bases:
+                continue
+            self.log(f"搜索 豆瓣：{q!r}")
             got = self.search_douban(q)
             douban_all += got
+            if not got and _base_key:
+                _failed_bases.add(_base_key)
+            # 命中够用的结果就停：继续换词搜只会增加请求量。
             if parsed.season is not None and any(
                     candidate_season(c) == parsed.season for c in got):
+                break
+            if got and any(c.extra.get("title_score", 0) >= 0.9
+                           for c in got):
                 break
         for d in douban_all[:4]:
             if d.original_title and d.extra.get("title_score", 0) >= 0.75:
                 imdb_queries.append(d.original_title)
 
         imdb_all = pools["imdb"]
-        for q in _dedupe_str(imdb_queries)[:8]:
-            imdb_all += self.search_imdb(q)
+        # IMDb 以前把 8 个词全搜一遍（换词时逐个重试），命中够了也不停；
+        # 现在命中高置信条目就收手，上限降到 4 个词，且同样跳过
+        # 已搜空基础名的季号变体。
+        _imdb_failed: set[str] = set()
+        for q in _dedupe_str(imdb_queries)[:4]:
+            _b = norm_title(strip_season_markers(q))
+            if _b and _b in _imdb_failed:
+                continue
+            self.log(f"搜索 IMDb：{q!r}")
+            got = self.search_imdb(q)
+            imdb_all += got
+            if not got and _b:
+                _imdb_failed.add(_b)
+            if any(c.extra.get("title_score", 0) >= 0.9 for c in got):
+                break
 
         # 静默补强：豆瓣条目页（登录状态）写着 IMDb / TMDB 编号，
         # 直接按编号生成候选放进池子——比标题搜索准确得多，
@@ -2017,18 +2117,28 @@ class MetadataClient:
         self._add_ids_from_douban(douban_all, pools, parsed, media_type)
 
         if self.tmdb_key:
+            _tmdb_failed: set[str] = set()
             for q in queries[:2]:
+                _b = norm_title(strip_season_markers(q))
+                if _b and _b in _tmdb_failed:
+                    continue
+                self.log(f"搜索 TMDB：{q!r}（{media_type}）")
                 got = self.search_tmdb(q, media_type)
                 # TMDB 把剧集和电影分开收录，判断错类型就会搜空：
                 #  ● 剧集目录没有季号 → 判成 movie，其实是 tv
                 #    （瓦舍江湖[全35集]…）
                 #  ● 剧场版/特别篇判成 tv，其实是 movie
                 #    （东离剑游纪：生死一剑）
-                # 两种方向都要补搜一次。
+                # 两种方向都要补搜一次（仅在这一词搜空时）。
                 if not got:
                     other = "movie" if media_type != "movie" else "series"
                     got = self.search_tmdb(q, other)
                 pools["tmdb"] += got
+                if not got and _b:
+                    _tmdb_failed.add(_b)
+                # 第一个词就有结果时不必再换词重搜。
+                if got:
+                    break
             if not pools["tmdb"]:
                 # 中文名常有一字之差（东离剑游**记** vs TMDB 的
                 # 东离剑游**纪**）。按常见异体字替换后再搜一次，

@@ -189,16 +189,17 @@ def fuzzy_queries(queries, media_type: str = "series",
         if RE_SEASON_NUM.search(base) or re.search(
                 r"(?i)最终季|final\s+season|part\s+\d+", base):
             continue
-        cn = cn_season_number(season)
         if RE_CJK.search(base):
-            add_out(f"{base} 第{cn}季")
-            if cn != str(season):
-                add_out(f"{base} 第{season}季")
+            # 「第一季」和「第1季」是同义写法，各站都能命中。
+            # 以前两个都生成，等于同一部剧多搜一轮，纯属浪费请求；
+            # 只保留中文数字版（更贴近豆瓣条目名）。
+            add_out(f"{base} 第{cn_season_number(season)}季")
         if re.search(r"[A-Za-z]", base):
             add_out(f"{base} Season {season}")
-            add_out(f"{base} S{season:02d}")
 
-    if year:
+    # 年份变体只在没有季号时补：有季号时「剧名 年份」几乎搜不到新结果，
+    # 却要为每个来源多付一次请求。
+    if year and not season_mode:
         for base in bases[:2]:
             add_out(f"{base} {year}")
 
