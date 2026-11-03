@@ -19,11 +19,14 @@ from urllib.parse import quote, unquote
 
 import requests
 
-APP_VERSION = "0.43"
-REPO_SLUG = "694185819/AutoRename115"
+APP_VERSION = "0.44"
+# 安装包发布仓库（公开，只放 exe）；源码仓库单独一个。
+REPO_SLUG = "694185819/AutoRename115-release"
 REPO_URL = f"https://github.com/{REPO_SLUG}"
 RELEASES_URL = f"{REPO_URL}/releases"
 LATEST_API = f"https://api.github.com/repos/{REPO_SLUG}/releases/latest"
+# 源码仓库：只用于「关于」里展示，检查更新不看它。
+SOURCE_URL = "https://github.com/694185819/AutoRename115"
 ASSET_NAME = "AutoRename115-portable.zip"
 USER_AGENT = f"AutoRename115/{APP_VERSION}"
 
@@ -71,6 +74,36 @@ def build_fingerprint() -> str:
 def is_official_build() -> bool:
     """是否带官方构建指纹（源码运行或他人重打包都返回 False）。"""
     return bool(build_info().get("build_id"))
+
+
+# ------------------------------------------------------------ 仓库迁移
+# 旧版本的 exe 里写死了 REPO_SLUG，改不了。所以在旧仓库最新 Release
+# 的说明里放一行标记，读到它就让用户去新仓库下载。
+MIGRATED_MARK = "<!-- migrated-to:"
+MIGRATED_HINT = (
+    "本项目已迁移到新的发布地址。\n\n"
+    "旧版本不再更新，请手动下载一次最新版：\n"
+    "{url}\n\n"
+    "下载安装一次之后，以后就能继续自动更新了。"
+)
+
+
+def parse_migration(notes: str) -> str:
+    """从 Release 说明里取出迁移目标地址；没有标记返回空串。"""
+    text = str(notes or "")
+    i = text.find(MIGRATED_MARK)
+    if i < 0:
+        return ""
+    j = text.find("-->", i)
+    if j < 0:
+        return ""
+    url = text[i + len(MIGRATED_MARK):j].strip()
+    return url if url.startswith("http") else ""
+
+
+def migration_url(release: dict) -> str:
+    """该 Release 声明的新仓库地址。"""
+    return parse_migration(str((release or {}).get("notes") or ""))
 
 
 def version_key(text: str) -> tuple[int, int, int, int]:
@@ -138,14 +171,19 @@ def fetch_latest_release(timeout: float = 15.0) -> dict:
         assets = data.get("assets") or []
         asset = next(
             (a for a in assets if a.get("name") == ASSET_NAME), None)
-        if not asset:
+        notes = str(data.get("body") or "")
+        migrated = parse_migration(notes)
+        # 迁移公告可以不挂安装包：这时候只提示用户去新地址，
+        # 不能因为「找不到资产」就当成检查失败。
+        if not asset and not migrated:
             raise RuntimeError(f"最新版本没有找到 {ASSET_NAME}。")
         return {
             "tag": str(data.get("tag_name") or ""),
             "name": str(data.get("name") or data.get("tag_name") or ""),
             "url": str(data.get("html_url") or RELEASES_URL),
-            "notes": str(data.get("body") or ""),
+            "notes": notes,
             "asset": asset,
+            "migrated_to": migrated,
         }
     except Exception as e:  # noqa: BLE001
         api_error = str(e)

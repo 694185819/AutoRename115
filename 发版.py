@@ -38,6 +38,8 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 DIST = os.path.join(BASE, "dist", "AutoRename115")
 ZIP = os.path.join(BASE, "AutoRename115-portable.zip")
 OWNER, NAME = "694185819", "AutoRename115"
+# 新版本发到这里（公开，只放安装包）；源码留在上面的仓库。
+RELEASE_REPO = "AutoRename115-release"
 REF = "main"
 PY = os.path.join(BASE, ".venv", "Scripts", "python.exe")
 PYINSTALLER = os.path.join(BASE, ".venv", "Scripts", "pyinstaller.exe")
@@ -122,7 +124,17 @@ def api(path: str, method: str = "GET", data=None, tok: str = "",
                 return json.loads(r.read().decode() or "null")
         except urllib.error.HTTPError as e:
             if e.code == 422 and method == "POST":
-                return None
+                # 422 有两种：版本已存在，或 target_commitish 指向的分支不存在。
+                # 只有前者才能当「已存在」处理，否则后面取 tags 一定 404。
+                text = ""
+                try:
+                    text = e.read().decode("utf-8", "replace")
+                except Exception:      # noqa: BLE001
+                    pass
+                if "already_exists" in text:
+                    return None
+                raise RuntimeError(
+                    f"创建 Release 被拒绝（422）：{text[:300]}") from e
             last = e
             warn(f"重试 {attempt + 1}/{retries}: {e}")
         except Exception as e:      # noqa: BLE001
@@ -287,12 +299,39 @@ def build(version: str) -> tuple[str, float]:
     return digest, size
 
 
+def announce_migration(tok: str, url: str) -> None:
+    """在旧仓库最新 Release 说明里插入迁移标记。
+
+    旧版 exe 读的就是旧仓库的 releases/latest，只有这条说明是它们
+    唯一能收到的信号。标记格式与 app/updater.py 的 MIGRATED_MARK 一致。
+    """
+    step("旧仓库留迁移提示")
+    try:
+        cur = api(f"/repos/{OWNER}/{NAME}/releases/latest", tok=tok)
+    except Exception as e:      # noqa: BLE001
+        warn(f"读不到旧仓库最新 Release：{e}")
+        return
+    body = str(cur.get("body") or "")
+    mark = f"<!-- migrated-to: {url} -->"
+    if mark in body:
+        ok("旧仓库已有迁移提示，跳过")
+        return
+    head = (f"> **本项目已迁移到新地址**：{url}\n>\n"
+            "> 旧版本不再更新，请到新地址下载一次最新版，"
+            "之后可继续自动更新。\n\n")
+    api(f"/repos/{OWNER}/{NAME}/releases/{cur['id']}", "PATCH",
+        {"body": mark + "\n" + head + body}, tok)
+    ok(f"已在旧仓库 {cur.get('tag_name')} 留下迁移提示")
+
+
 def publish(version: str, digest: str, size: float, tok: str,
             notes: str) -> None:
     tag = f"v{version}"
-    step(f"发布 {tag}")
+    step(f"发布 {tag} → {RELEASE_REPO}")
+    # 新版本一律发到只放安装包的公开仓库；源码仓库不再挂资产。
+    repo = f"{OWNER}/{RELEASE_REPO}"
     body = notes or f"## v{version}\n\n请在 Release 说明中补充本版改动。\n"
-    rel = api(f"/repos/{OWNER}/{NAME}/releases", "POST", {
+    rel = api(f"/repos/{repo}/releases", "POST", {
         "tag_name": tag,
         "name": f"{tag}",
         "body": body,
@@ -302,11 +341,11 @@ def publish(version: str, digest: str, size: float, tok: str,
     }, tok)
     if rel is None:
         warn(f"{tag} 已存在，改为覆盖资产与说明")
-        rel = api(f"/repos/{OWNER}/{NAME}/releases/tags/{tag}", tok=tok)
+        rel = api(f"/repos/{repo}/releases/tags/{tag}", tok=tok)
         for asset in rel.get("assets", []):
-            api(f"/repos/{OWNER}/{NAME}/releases/assets/{asset['id']}",
+            api(f"/repos/{repo}/releases/assets/{asset['id']}",
                 "DELETE", tok=tok)
-        api(f"/repos/{OWNER}/{NAME}/releases/{rel['id']}", "PATCH",
+        api(f"/repos/{repo}/releases/{rel['id']}", "PATCH",
             {"body": body, "name": f"{tag}"}, tok)
     ok(f"Release 就绪：{tag}")
 
@@ -428,6 +467,9 @@ def main() -> None:
     publish(version, digest, size, tok, notes)
     update_readme(version, tok, summary)
     commit_source(version, tok)
+    # 每次顺带确保旧仓库那条迁移提示还在，旧用户才有机会看到。
+    announce_migration(
+        tok, f"https://github.com/{OWNER}/{RELEASE_REPO}")
 
     step("完成")
     print(f"  版本   {version}")

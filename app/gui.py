@@ -1821,6 +1821,12 @@ class App(tk.Tk):
             return
         if not bool(self.settings.get("auto_check_updates", True)):
             return
+        # 仓库迁移：旧版 exe 里写死了老地址，只能靠这个提示把用户
+        # 引导到新仓库。优先级最高，不参与「忽略版本」。
+        migrated = str(release.get("migrated_to") or "")
+        if migrated:
+            self._alert_migration(migrated)
+            return
         tag = str(release.get("tag") or "")
         if not tag or not updater.is_newer(tag, updater.APP_VERSION):
             return
@@ -1831,6 +1837,25 @@ class App(tk.Tk):
         self._show_update_banner(release)
         self._log(f"发现新版本 {tag}（当前 {updater.APP_VERSION}），"
                   "已显示顶部更新提示。")
+
+    def _alert_migration(self, url: str) -> None:
+        """提示用户换了发布地址，只弹一次。"""
+        if str(self.settings.get("migration_noticed") or "") == url:
+            return
+        self.settings["migration_noticed"] = url
+        try:
+            self._save_settings()
+        except Exception:      # noqa: BLE001
+            pass
+        self._log(f"本项目已迁移到 {url}，请下载一次最新版。")
+        if messagebox.askyesno(
+                APP_TITLE,
+                updater.MIGRATED_HINT.format(url=url) + "\n\n现在打开网页吗？",
+                parent=self):
+            try:
+                webbrowser.open(url)
+            except Exception:      # noqa: BLE001
+                pass
 
     def _show_update_banner(self, release: dict) -> None:
         tag = str(release.get("tag") or "")
@@ -5105,8 +5130,8 @@ class AboutDialog(tk.Toplevel):
 
         fp.bind("<Button-1>", _copy_fp)
         repo_row = ttk.Frame(frame)
-        repo_row.pack(anchor="w", pady=(0, 10))
-        ttk.Label(repo_row, text="GitHub 仓库：").pack(side="left")
+        repo_row.pack(anchor="w", pady=(0, 4))
+        ttk.Label(repo_row, text="下载地址：").pack(side="left")
         self.repo_link = ttk.Label(
             repo_row, text=updater.REPO_URL, foreground="#0563c1",
             cursor="hand2", font=("Microsoft YaHei UI", 9, "underline"))
@@ -5115,6 +5140,23 @@ class AboutDialog(tk.Toplevel):
         self.repo_link.bind("<Return>", self._open_repo)
         self.repo_link.bind("<space>", self._open_repo)
         self.repo_link.configure(takefocus=True)
+        # 源码仓库单独一行：只供查看，不给下载入口
+        src_row = ttk.Frame(frame)
+        src_row.pack(anchor="w", pady=(0, 10))
+        ttk.Label(src_row, text="项目主页：").pack(side="left")
+        self.src_link = ttk.Label(
+            src_row, text=updater.SOURCE_URL, foreground="#0563c1",
+            cursor="hand2", font=("Microsoft YaHei UI", 9, "underline"))
+        self.src_link.pack(side="left")
+
+        def _open_src(_e=None):
+            try:
+                webbrowser.open(updater.SOURCE_URL)
+            except Exception:      # noqa: BLE001
+                pass
+
+        self.src_link.bind("<Button-1>", _open_src)
+        self.src_link.bind("<Return>", _open_src)
         qq_row = ttk.Frame(frame)
         qq_row.pack(anchor="w", pady=(0, 10))
         ttk.Label(qq_row, text="QQ 频道：").pack(side="left")
