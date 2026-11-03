@@ -89,15 +89,22 @@ MIGRATED_HINT = (
 
 
 def parse_migration(notes: str) -> str:
-    """从 Release 说明里取出迁移目标地址；没有标记返回空串。"""
+    """从 Release 说明里取出迁移目标地址；没有标记返回空串。
+
+    标记可能出现在任意位置、前面带缩进或引用的 ``>``，所以用正则
+    在全文里搜，不依赖行首。
+    """
     text = str(notes or "")
+    m = re.search(
+        r"migrated-to:\s*(https?://[^\s>]+?)\s*-->", text, re.I)
+    if m:
+        return m.group(1)
+    # 兼容没有写 --> 的旧格式（只认到行尾）
     i = text.find(MIGRATED_MARK)
     if i < 0:
         return ""
-    j = text.find("-->", i)
-    if j < 0:
-        return ""
-    url = text[i + len(MIGRATED_MARK):j].strip()
+    rest = text[i + len(MIGRATED_MARK):]
+    url = rest.split("\n")[0].replace("-->", "").strip()
     return url if url.startswith("http") else ""
 
 
