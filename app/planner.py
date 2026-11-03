@@ -354,10 +354,11 @@ def _provider_suffix(imdb_id: str, tmdb_id: str, style: str,
 
 
 def is_season_dir(name: str) -> bool:
-    """纯季目录名：Season 01 / S01 / 第二季 / Specials。"""
+    """纯季目录名：Season 01 / S01 / 第二季 / Specials / 特别篇系列。"""
     name = unicodedata.normalize("NFKC", (name or "").strip())
     return bool(SEASON_RE.match(name)) or bool(SEASON_ROMAN_RE.match(name)) or \
-        bool(SPECIAL_RE.match(name)) or bool(PREFIX_SEASON_RE.match(name))
+        bool(SPECIAL_RE.match(name)) or bool(PREFIX_SEASON_RE.match(name)) or \
+        is_specials_dir(name)
 
 
 def _embedded_season(name: str) -> Optional[int]:
@@ -399,7 +400,7 @@ def looks_like_season_dir(name: str) -> bool:
 
 def season_from_dir(name: str) -> Optional[int]:
     name = unicodedata.normalize("NFKC", (name or "").strip())
-    if SPECIAL_RE.match(name):
+    if SPECIAL_RE.match(name) or is_specials_dir(name):
         return 0
     m = SEASON_RE.match(name)
     if not m:
@@ -481,6 +482,37 @@ def _is_generic_dir(name: str) -> bool:
     if len(rest) >= 2 and re.search(r"[㐀-鿿぀-ヿa-z0-9]", rest):
         return False
     return True
+
+
+# 特别篇容器名：Specials / SP / OVA / OAD / 特别篇 / 番外 / 特典。
+# 这类目录只是「第 0 季」的容器，本身不是片名。以前把「特别篇」当片名
+# 去搜，会命中「万圣街特别篇：古堡的秘密」「大猿魂 特别篇」这类
+# 完全无关的条目，而且父目录明明带着 [tmdbid-xxxx] 也被跳过。
+RE_SPECIAL_CONTAINER = re.compile(
+    r"(?i)^(?:specials?|sp|sps|ova|oad|ovs|番外|番外篇|特別篇|特别篇|"
+    r"特别篇集|特別篇集|特典|映像特典|extras?|bonus)$")
+# 「特别篇系列」「OVA合集」这类尾巴只是目录习惯写法，去掉后再判定。
+RE_SPECIAL_TAIL = re.compile(
+    r"(?i)(?:\s*(?:系列|合集|全集|专题|专辑|篇集|set|collection|series))+$")
+
+
+def _specials_core(name: str) -> str:
+    """去掉「系列/合集」这类尾巴后的核心名字。"""
+    s = unicodedata.normalize("NFKC", (name or "").strip())
+    s = RE_SPECIAL_TAIL.sub("", s)
+    return s.strip(" \t[]【】()（）{}._-—–")
+
+
+def is_specials_dir(name: str) -> bool:
+    """是否是「特别篇」容器目录（第 0 季）。
+
+    「特别篇系列」去掉尾巴「系列」后是「特别篇」，同样算；
+    「[BD-REMUX]最终流放系列」去掉后是「[BD-REMUX]最终流放」，不算。
+    """
+    core = _specials_core(name)
+    if not core:
+        return False
+    return bool(RE_SPECIAL_CONTAINER.match(core))
 
 
 def _titles_related(query: str, title: str) -> bool:
@@ -627,6 +659,9 @@ def _usable_query(q: str) -> bool:
     if not q or len(norm_title(q)) < 2:
         return False
     if _is_generic_dir(q):
+        return False
+    # 「特别篇」「特别篇系列」「Specials」是第 0 季容器，不是片名。
+    if is_specials_dir(q):
         return False
     if _is_meaningless_title(q):
         return False
@@ -1037,7 +1072,11 @@ class Planner:
         current_name = mr.item.name
         base = parse_name(current_name, is_dir=mr.item.is_dir,
                           parent_season=mr.root_season)
-        current_generic = _is_generic_dir(current_name)
+        # 「特别篇」「特别篇系列」「Specials」只是第 0 季的容器目录，
+        # 本身不是片名：当成片名去搜会命中「万圣街特别篇」这类无关条目，
+        # 而且会让父目录里的 [tmdbid-xxxx] 被 ID 校验过滤掉。
+        current_generic = (_is_generic_dir(current_name) or
+                           is_specials_dir(current_name))
         # “S1替换双语字幕”是季目录+说明；“S1东离剑游记”虽然也带 S1，
         # 但后缀是真正的片名，要保留。只有后缀全是说明时才清空。
         season_desc = is_season_dir(current_name) and \
@@ -3981,6 +4020,16 @@ class Planner:
                 ops.insert(0, RenameOp(fid=mr.item.fid, old_name=mr.item.name,
                                        new_name=folder_name, is_dir=True,
                                        role="show", parent_id=mr.item.parent_id))
+        elif mr.item.is_dir and is_specials_dir(mr.item.name) and \
+                self.options.rename_season_folders:
+            # 选中的本身就是「特别篇」容器目录：它是第 0 季，
+            # 不能改成剧集文件夹名（会和父目录同名、把两季并成一季），
+            # 按 Emby/Jellyfin 惯例改成 Specials。
+            if mr.item.name != "Specials":
+                ops.insert(0, RenameOp(fid=mr.item.fid, old_name=mr.item.name,
+                                       new_name="Specials", is_dir=True,
+                                       role="season",
+                                       parent_id=mr.item.parent_id))
 
         if not plan.season_confirmed:
             # 季号没确认前，不生成集数改名，避免改错

@@ -899,6 +899,10 @@ class App(tk.Tk):
         self.log_text = tk.Text(log_frame, height=4, wrap="word",
                                 font=("Consolas", 9), state="disabled",
                                 background="#fafafa", relief="flat")
+        # 任务完成用绿字写在日志里，不再弹框打断操作；
+        # 只有报错/风控才弹窗。
+        self.log_text.tag_configure("ok", foreground="#1a7f37")
+        self.log_text.tag_configure("err", foreground="#c62828")
         lvs = ttk.Scrollbar(log_frame, orient="vertical",
                             command=self.log_text.yview)
         self.log_text.configure(yscrollcommand=lvs.set)
@@ -990,7 +994,7 @@ class App(tk.Tk):
     def _show_task_error(self, payload) -> None:
         """任务异常弹窗：疑似 115 风控时只给等待提醒，不展示原始报错。"""
         raw = str(payload)
-        self._log("错误：" + raw)
+        self._log_err("错误：" + raw)
         if self._is_risk_error(raw):
             messagebox.showwarning(
                 APP_TITLE,
@@ -1211,28 +1215,40 @@ class App(tk.Tk):
         msg = (f"NFO/图片保存完成：{action} {s['uploads']}，"
                f"改名 {s['renames']}，删除 {s['deleted']}，"
                f"跳过 {s['skipped']}。")
-        self._log(msg)
-        messagebox.showinfo(APP_TITLE, msg, parent=self)
+        # 完成只写绿字日志，不弹窗（弹窗会打断连续操作）
+        self._log_ok(msg)
 
     def _on_nfo_clear(self, payload) -> None:
         self._set_busy(False)
         s = payload
         where = "当前文件夹" if s.get("scope") == "current" else "所选任务"
         msg = f"{where}：已移入 115 回收站的 NFO/图片 {s['count']} 个。"
-        self._log(msg)
-        messagebox.showinfo(APP_TITLE, msg, parent=self)
+        self._log_ok(msg)
 
 
     # ------------------------------------------------------------ 日志/忙碌
-    def _log(self, text: str) -> None:
+    def _log(self, text: str, tag: str = "") -> None:
+        if not hasattr(self, "log_text"):
+            return
         ts = time.strftime("%H:%M:%S")
         self.log_text.configure(state="normal")
-        self.log_text.insert("end", f"[{ts}] {text}\n")
+        line = f"[{ts}] {text}\n"
+        if tag:
+            self.log_text.insert("end", line, tag)
+        else:
+            self.log_text.insert("end", line)
         lines = int(self.log_text.index("end-1c").split(".")[0])
         if lines > 400:
             self.log_text.delete("1.0", f"{lines - 350}.0")
         self.log_text.see("end")
         self.log_text.configure(state="disabled")
+
+    def _log_ok(self, text: str) -> None:
+        """任务完成：绿字写进日志即可，不弹窗。"""
+        self._log(text, tag="ok")
+
+    def _log_err(self, text: str) -> None:
+        self._log(text, tag="err")
 
     def _progress_begin(self, determinate: bool) -> None:
         try:
@@ -1976,13 +1992,13 @@ class App(tk.Tk):
             fail = "；".join(
                 f"{r.old_name}: {r.message}" for r in results if not r.ok)
             fail = fail or "未返回改名结果"
-            self._log(f"左侧目录改名失败：{fail}")
+            self._log_err(f"左侧目录改名失败：{fail}")
             messagebox.showerror(
                 APP_TITLE, f"改名失败：\n{fail}", parent=self)
             return
         self.undo.record([op], results, scope=self._undo_scope())
         self._sync_renamed_item(item, op.fid, op.old_name, op.new_name)
-        self._log(f"改名成功：{op.old_name} → {op.new_name}")
+        self._log_ok(f"改名成功：{op.old_name} → {op.new_name}")
         if item.is_dir and item.fid == self.current_cid:
             self.path_stack[-1] = (item.fid, op.new_name)
             self.path_label.configure(
@@ -4439,9 +4455,7 @@ class App(tk.Tk):
                 by_fid[op.fid] = op
                 ops.append(op)
         if not ops:
-            messagebox.showinfo(APP_TITLE,
-                                "没有需要改名的项目（可能都已经改好了）。",
-                                parent=self)
+            self._log("没有需要改名的项目（可能都已经改好了）。")
             return
         problem = self._validate_ops(ops)
         if problem:
@@ -4511,7 +4525,10 @@ class App(tk.Tk):
         ok = sum(1 for r in results if r.ok)
         fail = len(results) - ok
         self.undo.record(ops, results, scope=self._undo_scope())
-        self._log(f"重命名完成：成功 {ok}，失败 {fail}。")
+        if fail:
+            self._log_err(f"重命名完成：成功 {ok}，失败 {fail}。")
+        else:
+            self._log_ok(f"重命名完成：成功 {ok}，失败 0。")
         # 如果当前目录本身被改名，更新路径显示
         for op in ops:
             if op.is_dir and op.fid == self.current_cid:
@@ -4531,7 +4548,9 @@ class App(tk.Tk):
                        f"跳过 {skipped}。")
             if nfo_bad:
                 nfo_msg += f"失败 {len(nfo_bad)} 个。"
-            self._log(nfo_msg)
+                self._log_err(nfo_msg)
+            else:
+                self._log_ok(nfo_msg)
         if fail or nfo_bad:
             parts: list[str] = []
             if fail:
@@ -4555,10 +4574,11 @@ class App(tk.Tk):
             messagebox.showwarning(APP_TITLE, "\n\n".join(parts),
                                    parent=self)
         else:
-            text = f"已完成 {ok} 个重命名。"
-            if auto_nfo:
-                text += "\n\n" + (nfo_msg or "自动保存 NFO/图片：没有可保存的任务。")
-            messagebox.showinfo(APP_TITLE, text, parent=self)
+            # 全部成功：只写绿字总结，不弹窗（弹窗会打断连续操作）
+            text = f"全部完成：重命名 {ok} 项"
+            if auto_nfo and not nfo_ok:
+                text += "；自动保存 NFO/图片：没有可保存的任务"
+            self._log_ok(text + "。")
         self.plans = []
         self._render_plans()
         self._discard_plans_cache()
@@ -4588,7 +4608,7 @@ class App(tk.Tk):
     def _after_undo(self, results) -> None:
         self._set_busy(False)
         ok = sum(1 for r in results if r.ok)
-        self._log(f"撤销结果：成功 {ok} 个。")
+        self._log_ok(f"撤销结果：成功 {ok} 个。")
         self._discard_plans_cache()
         self.refresh()
 
