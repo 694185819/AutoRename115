@@ -848,6 +848,25 @@ class App(tk.Tk):
             command=self._toggle_naming_source)
         self.name_by_source_btn.pack(side="right", padx=(8, 0))
 
+        # 第二行：「资料来源」下方的一整行编号输入框。
+        # 平时隐藏，只有点「套用结果 / 重搜」时才出现——免得某个渠道
+        # 没收录（例如 TMDB 搜不到这部）就完全没法用：直接填该站编号，
+        # 回车即按编号取回条目。
+        id_row = ttk.Frame(info)
+        self.info_id_row = id_row
+        self.info_id_var = tk.StringVar()
+        self.info_id_entry = ttk.Entry(id_row, textvariable=self.info_id_var,
+                                       width=22)
+        self.info_id_entry.pack(side="left")
+        self.info_id_hint = ttk.Label(
+            id_row, text="填该站编号，回车套用",
+            foreground="#777")
+        self.info_id_hint.pack(side="left", padx=(6, 0))
+        self.info_id_entry.bind("<Return>", self._apply_manual_source_id)
+        self.info_id_entry.bind("<Escape>",
+                                lambda e: self._hide_source_id_entry())
+        self._source_id_visible = False
+
         body = ttk.Frame(info)
         body.pack(fill="x", pady=(5, 0))
         poster_box = tk.Frame(body, width=90, height=130,
@@ -2394,6 +2413,8 @@ class App(tk.Tk):
             # 已经是这个来源 → 再点一次表示重搜
             p = self.detail_plan
             if p is not None:
+                # 同时亮出手动填 ID 的输入框：渠道没收录时可直接按编号取
+                self._show_source_id_entry(key)
                 self._research_info_source(p, key)
             return
         # 点击的是新来源：让 command 去处理切换（避免重复执行）
@@ -2414,15 +2435,99 @@ class App(tk.Tk):
         source = self.info_source_var.get()
         # 点的是当前已选中的来源 → 视为“刷新/重搜”
         if source and source == getattr(self, "_last_info_source", None):
+            self._show_source_id_entry(source)
             self._research_info_source(p, source)
             return
         self._last_info_source = source
+        # 换了来源就收起编号输入框，避免误以为是当前渠道的
+        self._hide_source_id_entry()
 
         if self.name_by_source_var.get():
             if source and p.name_source != source:
                 self._set_naming_source(p, source)
                 return
         self._load_info()
+
+    # ------------------------------------------------------------ 手填渠道 ID
+    SOURCE_LABELS = {"douban": "豆瓣", "bangumi": "Bangumi",
+                     "imdb": "IMDb", "tmdb": "TMDB"}
+
+    def _show_source_id_entry(self, source: str) -> None:
+        """在「资料来源」下方亮出编号输入框，焦点给到它。"""
+        if not hasattr(self, "info_id_entry"):
+            return
+        try:
+            self.info_id_hint.configure(
+                text=f"填 {self.SOURCE_LABELS.get(source, source)} 的条目编号，回车套用")
+            # 整行挂在 src_row 下方（info 内的第二个 pack 项）
+            if not self.info_id_row.winfo_manager():
+                self.info_id_row.pack(fill="x", pady=(4, 0))
+            self._source_id_visible = True
+            self.info_id_entry.focus_set()
+        except Exception:      # noqa: BLE001
+            pass
+
+    def _hide_source_id_entry(self) -> None:
+        if not hasattr(self, "info_id_entry"):
+            return
+        try:
+            self.info_id_row.pack_forget()
+            self._source_id_visible = False
+        except Exception:      # noqa: BLE001
+            pass
+
+    def _apply_manual_source_id(self, _event=None):
+        """按用户填写的渠道编号直接取回条目，跳过标题搜索。"""
+        p = self.detail_plan
+        if p is None:
+            return "break"
+        raw = str(self.info_id_var.get() or "").strip()
+        if not raw:
+            return "break"
+        source = self.info_source_var.get() or ""
+        label = self.SOURCE_LABELS.get(source, source)
+        # 只留数字（TMDB/豆瓣/Bangumi）或 tt 开头的 IMDb 编号
+        clean = re.sub(r"[^0-9]", "", raw)
+        if source == "imdb":
+            m = re.search(r"(tt\d{5,})", raw, re.I)
+            clean = m.group(1).lower() if m else clean
+        if not clean:
+            self._log_err(f"「{raw}」不是有效的{label}编号。")
+            return "break"
+
+        # 写回任务身份，之后重建/应用都用这个编号
+        try:
+            if source == "imdb":
+                p.match.imdb_id = clean
+                from app.models import Candidate
+                p.match.imdb = Candidate(
+                    source="imdb", title=p.title or "", sid=clean,
+                    kind="tv" if p.media_type == "series" else "movie")
+            elif source == "tmdb":
+                p.match.tmdb_id = clean
+                from app.models import Candidate
+                p.match.tmdb = Candidate(
+                    source="tmdb", title=p.title or "", sid=clean,
+                    kind="tv" if p.media_type == "series" else "movie")
+            elif source == "douban":
+                p.match.douban_id = clean
+            elif source == "bangumi":
+                p.match.bangumi_id = clean
+        except Exception as e:      # noqa: BLE001
+            self._log_err(f"写入编号失败：{e}")
+            return "break"
+
+        self._log_ok(f"已填入{label}编号：{clean}")
+        try:
+            self.info_status.configure(text=f"{label} 编号已填", foreground="#176b33")
+        except Exception:      # noqa: BLE001
+            pass
+        if self.name_by_source_var.get():
+            self._set_naming_source(p, source)
+        else:
+            self._render_plans()
+            self._load_info()
+        return "break"
 
     def _research_info_source(self, p: PlanItem, source: str) -> None:
         """对指定来源重新搜一次（用当前任务的关键词）。
