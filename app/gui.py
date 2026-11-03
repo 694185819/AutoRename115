@@ -5084,7 +5084,26 @@ class AboutDialog(tk.Toplevel):
         self.version_label = ttk.Label(
             frame, text=f"版本 {updater.APP_VERSION}",
             foreground="#176b33")
-        self.version_label.pack(anchor="w", pady=(4, 10))
+        self.version_label.pack(anchor="w", pady=(4, 0))
+        # 构建指纹：官方打包才有；源码运行显示「开发版」。
+        # 便于用户报告问题时提供，也便于核对是不是原版。
+        fp_row = ttk.Frame(frame)
+        fp_row.pack(anchor="w", pady=(2, 10))
+        ttk.Label(fp_row, text="构建：", foreground="#777").pack(side="left")
+        fp = ttk.Label(fp_row, text=updater.build_fingerprint(),
+                       foreground="#555", cursor="hand2")
+        fp.pack(side="left")
+        self.build_label = fp
+
+        def _copy_fp(_e=None):
+            try:
+                self.clipboard_clear()
+                self.clipboard_append(updater.build_fingerprint())
+                self.app._log_ok("已复制构建指纹。")
+            except Exception:      # noqa: BLE001
+                pass
+
+        fp.bind("<Button-1>", _copy_fp)
         repo_row = ttk.Frame(frame)
         repo_row.pack(anchor="w", pady=(0, 10))
         ttk.Label(repo_row, text="GitHub 仓库：").pack(side="left")

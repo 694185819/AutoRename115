@@ -27,6 +27,51 @@ LATEST_API = f"https://api.github.com/repos/{REPO_SLUG}/releases/latest"
 ASSET_NAME = "AutoRename115-portable.zip"
 USER_AGENT = f"AutoRename115/{APP_VERSION}"
 
+# ------------------------------------------------------------ 构建指纹
+# 打包时由 发版.py 写入 data/build.json（源码运行时不存在）。
+# 用途：区分「官方原版」与「他人重打包」，也便于事后溯源。
+_BUILD_INFO_CACHE: Optional[dict] = None
+
+
+def build_info() -> dict:
+    """读取本机这份程序的构建指纹；读不到时返回空字典。"""
+    global _BUILD_INFO_CACHE
+    if _BUILD_INFO_CACHE is not None:
+        return _BUILD_INFO_CACHE
+    info: dict = {}
+    try:
+        import json
+        # 打包后 sys.executable 位于 dist\AutoRename115\
+        base = os.path.dirname(os.path.abspath(sys.executable))
+        path = os.path.join(base, "data", "build.json")
+        if os.path.isfile(path):
+            with open(path, encoding="utf-8") as f:
+                info = json.load(f) or {}
+    except Exception:      # noqa: BLE001
+        info = {}
+    _BUILD_INFO_CACHE = info
+    return info
+
+
+def build_fingerprint() -> str:
+    """一行可复制的指纹串，用于报告问题或核对来源。"""
+    info = build_info()
+    if not info:
+        return "开发版（源码运行）"
+    parts = []
+    if info.get("version"):
+        parts.append(f"v{info['version']}")
+    if info.get("build_id"):
+        parts.append(str(info["build_id"]))
+    if info.get("built_at"):
+        parts.append(str(info["built_at"]))
+    return " · ".join(parts) if parts else "未知构建"
+
+
+def is_official_build() -> bool:
+    """是否带官方构建指纹（源码运行或他人重打包都返回 False）。"""
+    return bool(build_info().get("build_id"))
+
 
 def version_key(text: str) -> tuple[int, int, int, int]:
     nums = [int(x) for x in re.findall(r"\d+", str(text or ""))][:4]
