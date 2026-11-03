@@ -652,6 +652,10 @@ class App(tk.Tk):
         self.undo_btn.pack(side="right", padx=6)
         ttk.Label(ptool, text="左键拖动 / Ctrl / Shift 多选 · 右键任务可移除",
                   foreground="#777").pack(side="left", padx=12)
+        # 分季提示：一个圆圈问号，鼠标悬停才展开说明，平时只占一个小图标
+        self.season_hint_badge = self._make_hint_badge(
+            ptool, self.SEASON_HINT_TEXT)
+        self.season_hint_badge.pack(side="left")
         plan_header = ttk.Frame(right)
         plan_header.pack(fill="x", pady=(0, 2))
         ttk.Label(plan_header, text="等待处理的任务", foreground="#333",
@@ -975,6 +979,62 @@ class App(tk.Tk):
         self.after(300, self._set_sash)
         self._refresh_mode_controls()
 
+
+    SEASON_HINT_TEXT = (
+        "分析剧集时，如果分季文件夹本身对季的描述比较含糊、"
+        "或者没有明显的 S1、S2 这样的标记，就可能出现分析错乱。\n\n"
+        "这种情况下，可以先在左侧文件夹上用右键菜单，"
+        "把该文件夹添加或修改出比较明显的分季特征（例如 \"Season 02\"、"
+        "\"S02\"、\"第二季\"），再重新分析、重命名。")
+
+    def _make_hint_badge(self, parent, text: str) -> tk.Label:
+        """圆圈问号标记：平时只是一个小图标，鼠标悬停才浮出说明。"""
+        lab = tk.Label(parent, text="?", cursor="hand2",
+                       foreground="#ffffff", background="#2a6fb0",
+                       font=("Segoe UI", 9, "bold"),
+                       width=2, padx=0, pady=0)
+        self._attach_hover_tip(lab, text)
+        return lab
+
+    def _attach_hover_tip(self, widget, text: str) -> None:
+        """给控件挂一个跟随鼠标的浅色说明气泡。"""
+        state = {"tip": None}
+
+        def show(event=None) -> None:
+            if state["tip"] is not None:
+                return
+            try:
+                tip = tk.Toplevel(widget)
+                tip.wm_overrideredirect(True)
+                try:
+                    tip.attributes("-topmost", True)
+                except Exception:      # noqa: BLE001
+                    pass
+                tk.Label(
+                    tip, text=text, justify="left",
+                    background="#ffffe1", foreground="#333",
+                    relief="solid", borderwidth=1,
+                    font=("Microsoft YaHei UI", 9),
+                    wraplength=460, padx=8, pady=6).pack()
+                if event is not None:
+                    tip.wm_geometry(
+                        f"+{event.x_root + 14}+{event.y_root + 18}")
+                state["tip"] = tip
+            except Exception:      # noqa: BLE001
+                state["tip"] = None
+
+        def hide(_event=None) -> None:
+            tip = state["tip"]
+            state["tip"] = None
+            if tip is not None:
+                try:
+                    tip.destroy()
+                except Exception:      # noqa: BLE001
+                    pass
+
+        widget.bind("<Enter>", show, add="+")
+        widget.bind("<Leave>", hide, add="+")
+        widget.bind("<Button-1>", hide, add="+")
 
     def _set_sash(self) -> None:
         # 左栏默认拉宽一些；两栏之间只用 Panedwindow 自带的细分隔条
