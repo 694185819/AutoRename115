@@ -561,7 +561,9 @@ def _is_generic_dir(name: str) -> bool:
 # 完全无关的条目，而且父目录明明带着 [tmdbid-xxxx] 也被跳过。
 RE_SPECIAL_CONTAINER = re.compile(
     r"(?i)^(?:specials?|sp|sps|ova|oad|ovs|番外|番外篇|特別篇|特别篇|"
-    r"特别篇集|特別篇集|特典|映像特典|extras?|bonus)$")
+    r"特别篇集|特別篇集|特典|映像特典|extras?|bonus|"
+    # 小剧场 / 迷你剧场 / 短篇集 也是第 0 季容器
+    r"小剧场|小劇場|迷你剧场|迷你劇場|短篇集|短片集)$")
 # 「特别篇系列」「OVA合集」这类尾巴只是目录习惯写法，去掉后再判定。
 RE_SPECIAL_TAIL = re.compile(
     r"(?i)(?:\s*(?:系列|合集|全集|专题|专辑|篇集|set|collection|series))+$")

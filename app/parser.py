@@ -18,9 +18,19 @@ KNOWN_EXTS = VIDEO_EXTS | SUB_EXTS | AUDIO_EXTS | {
 }
 
 # ---------------------------------------------------------------- 正则
+# 季号允许写成形似数字的字母：O→0、I→1（SOE01 就是 S0E01）。
+# 这类写法在「小剧场」「特别篇」目录里非常常见，
+# 以前整批文件解析不出季集，只能人工处理。
 RE_SXXEXX = re.compile(
-    r"(?i)(?<![A-Za-z0-9])S(\d{1,2})\s*[._ -]?\s*E(?:P)?(\d{1,4})"
+    r"(?i)(?<![A-Za-z0-9])S([0-9Oil]{1,2})\s*[._ -]?\s*E(?:P)?(\d{1,4})"
     r"(?:\s*[-~]\s*E?(\d{1,4}))?(?![0-9])")
+
+
+def _season_digits(raw: str) -> int:
+    """把 S 后面的季号转成整数，兼容 O→0、I/l→1。"""
+    table = {"O": "0", "o": "0", "I": "1", "i": "1", "l": "1"}
+    text = "".join(table.get(ch, ch) for ch in str(raw or ""))
+    return int(text) if text.isdigit() else 0
 RE_SEASON_CN = re.compile(r"第\s*([0-9零一二两三四五六七八九十]+)\s*季")
 RE_SEASON_EN = re.compile(r"(?i)(?<![A-Za-z])Season\s*(\d{1,2})(?![0-9])")
 RE_SEASON_S = re.compile(r"(?i)(?<![A-Za-z0-9])S(\d{1,2})(?![0-9E])")
@@ -430,7 +440,7 @@ def parse_name(raw: str, is_dir: bool = False,
 
     m = RE_SXXEXX.search(work)
     if m:
-        season = int(m.group(1))
+        season = _season_digits(m.group(1))
         episode = int(m.group(2))
         if m.group(3):
             ep_end = int(m.group(3))
