@@ -74,6 +74,14 @@ RE_NUMBERED_CATEGORY = re.compile(
 _SEASON_TAIL = (
     r"(?:[\s._-]*(?:\[[^\]]*\]|\([^)]*\)|全\s*\d+\s*集|"
     r"共\s*\d+\s*集|全集|完结))*[\s._-]*")
+# 日文写法：シーズン1 / 第1シーズン / シーズン 01
+RE_JP_SEASON = re.compile(
+    r"(?:^|(?<=[\s._\-\]）)]))(?:第\s*)?([0-9一二三四五六七八九十]+)\s*"
+    r"(?:シーズン|シーズンズ)(?=$|[\s._\-\[（(])|"
+    r"(?:^|(?<=[\s._\-\]）)]))(?:シーズン|シーズンズ)\s*"
+    r"([0-9一二三四五六七八九十]+)(?=$|[\s._\-\[（(])")
+# 带圈数字 ①②③…⑳ 常用来表示季
+RE_CIRCLED_SEASON = re.compile(r"[\u2460-\u2473]")
 SEASON_RE = re.compile(
     r"(?i)^(?:s|season|series)[\s._-]*0?(\d{1,2})" + _SEASON_TAIL + r"$|"
     r"^第\s*([0-9零一二两三四五六七八九十]+)\s*[季期部]" +
@@ -398,10 +406,48 @@ def looks_like_season_dir(name: str) -> bool:
     return is_season_dir(name) or _embedded_season(name) is not None
 
 
+def _circled_to_int(ch: str) -> Optional[int]:
+    """①②③…⑳ → 1..20。"""
+    code = ord(ch)
+    if 0x2460 <= code <= 0x2473:
+        return code - 0x2460 + 1
+    return None
+
+
+def _jp_season(name: str) -> Optional[int]:
+    """日文「シーズン1」「第2シーズン」里的季号。"""
+    m = RE_JP_SEASON.search(name or "")
+    if not m:
+        return None
+    raw = next((g for g in m.groups() if g), "")
+    if raw.isdigit():
+        return int(raw)
+    try:
+        from .parser import cn_number
+        return cn_number(raw)
+    except Exception:
+        return None
+
+
 def season_from_dir(name: str) -> Optional[int]:
-    name = unicodedata.normalize("NFKC", (name or "").strip())
+    raw_name = (name or "").strip()
+    # 带圈数字（① = 第 1 季）必须在 NFKC 之前判断：
+    # NFKC 会把 ① 归一成普通数字 1，之后就分辨不出来了。
+    m_circ = RE_CIRCLED_SEASON.search(raw_name)
+    if m_circ:
+        got = _circled_to_int(m_circ.group(0))
+        if got:
+            # 只有「剧名 + ①」这种把带圈数字放在末尾的才算季号，
+            # 避免把「①某某剧」这类前缀编号误当季号。
+            if m_circ.end() >= len(raw_name.rstrip(" ._-[]()（）【】")):
+                return got
+    name = unicodedata.normalize("NFKC", raw_name)
     if SPECIAL_RE.match(name) or is_specials_dir(name):
         return 0
+    # 日文 シーズン1
+    got = _jp_season(name)
+    if got:
+        return got
     m = SEASON_RE.match(name)
     if not m:
         m = SEASON_ROMAN_RE.match(name)
@@ -448,9 +494,28 @@ def season_from_text(text: str) -> Optional[int]:
     return None
 
 
+# 带剧名前缀的分部：「进击的巨人 上」「进击的巨人 后篇」「XX Part 1」
+# 这类目录是同一部剧的不同部分，不能当成两部独立的剧。
+RE_PART_SUFFIX = re.compile(
+    r"(?i)[\s._\-·:：]*(?:"
+    r"(?:上|下|中)\s*(?:部|篇|集|卷)?"
+    r"|(?:前|后|後)\s*(?:篇|编|編|部分|半)"
+    r"|(?:part|vol(?:ume)?|disc|dvd|bd)\s*[._\-]?\s*(?:[0-9]+|[ivxlcdm]+|one|two|three|four)"
+    r"|第\s*[一二三四五六七八九十0-9]+\s*(?:部|篇|部分|章)"
+    r"|(?:season|シーズン)\s*[0-9]+"
+    r")\s*$")
+
+
 def is_part_dir(name: str) -> bool:
-    return bool(PART_RE.match(
-        unicodedata.normalize("NFKC", (name or "").strip())))
+    norm = unicodedata.normalize("NFKC", (name or "").strip())
+    if PART_RE.match(norm):
+        return True
+    # 带剧名前缀的分部；要求去掉后缀后还剩至少 2 个字，避免把
+    # 片名本身就叫「上下」的作品误判（那种会被 PART_RE 抓走）
+    core = RE_PART_SUFFIX.sub("", norm).strip(" ._-[]()（）【】")
+    if core and core != norm and len(core) >= 2:
+        return True
+    return False
 
 
 def is_subs_dir(name: str) -> bool:
@@ -889,7 +954,13 @@ class Planner:
         # 不是纯 “S01”。只在当前目录不是“动画/电视剧”这类库目录、
         # 且这些子目录的剧名一致时，才当成同一部剧的季目录；否则继续
         # 向下递归，避免把一个库目录里的多部剧硬拼成一部。
-        if not season_dirs and not _is_generic_dir(dir_item.name):
+        # 只要还没找到「真正的数字季目录」，就继续尝试松散匹配。
+        # 不能写成 `not season_dirs`：只要目录里有个 Specials（它本身是
+        # 合法的季目录名字），条件就不成立，S1/S2 这种带剧名前缀的季目录
+        # 会被整个跳过，最后每个季目录被当成独立的一部剧。
+        _has_numbered = any(
+            (season_from_dir(d.name) or 0) > 0 for d in season_dirs)
+        if not _has_numbered and not _is_generic_dir(dir_item.name):
             loose = [d for d in dirs if not is_season_dir(d.name) and
                      looks_like_season_dir(d.name)]
             loose_parsed = [parse_name(d.name, is_dir=True) for d in loose]
@@ -913,7 +984,9 @@ class Planner:
             # 每个目录都必须真的带季号，否则不是“分季”结构
             has_season = all(p.season is not None for p in loose_parsed)
             if loose and same_show and has_season:
-                season_dirs = loose
+                # 合并而不是覆盖：Specials 已经在 season_dirs 里时不能被丢掉
+                extra = [d for d in loose if d not in season_dirs]
+                season_dirs = list(season_dirs) + extra
         part_dirs = [d for d in dirs if is_part_dir(d.name)]
 
         # ---- 字幕/归档子目录：按「内容」判定，不依赖文件夹名字 ----
@@ -1978,6 +2051,35 @@ class Planner:
 
     def _detect_category(self, media_type: str, match: MatchResult,
                          parsed: ParsedName, context: str = "") -> str:
+        """分类：先按元数据判定，再用独立证据核实一遍。
+
+        元数据可能匹配到错误条目（例如把《进击的巨人 学园》匹配成别的
+        作品），一错就把分类带错。category_verify 用不依赖匹配结果的证据
+        （假名、路径分区、元数据自洽性）交叉验证，冲突时以证据为准。
+        """
+        cat = self._detect_category_raw(media_type, match, parsed, context)
+        if media_type == "movie" or not cat:
+            return cat
+        try:
+            from .category_verify import collect_evidence, verify_category
+            original = (getattr(match, "title_original", "") or
+                        getattr(parsed, "title", "") or "")
+            evidence = collect_evidence(
+                parsed_title=getattr(parsed, "title", "") or "",
+                context=context or "",
+                original_title=original,
+                country=getattr(match, "country", "") or "")
+            cat, notes = verify_category(cat, evidence)
+            for note in notes:
+                if note not in match.notes:
+                    match.notes.append(note)
+        except Exception:      # noqa: BLE001
+            # 核实是锦上添花，绝不能因为它让分析失败
+            pass
+        return cat
+
+    def _detect_category_raw(self, media_type: str, match: MatchResult,
+                             parsed: ParsedName, context: str = "") -> str:
         if media_type == "movie":
             return "movie"
         path_anime, path_tv, path_tv_strong = \
@@ -4130,9 +4232,14 @@ class Planner:
     # ------------------------------------------------------------ 字幕匹配
     # 字幕语言标记：必须保留在文件名末尾，否则「简日 JPSC」和
     # 「繁日 JPTC」会被改成同一个名字而互相覆盖。
+    # 先匹配「限定词 + 日军标记」的完整组合（CN-ja / TW-ja / SC-JP …），
+    # 否则会只取到尾巴上的 ja，让简体日字与繁体日字重名。
     _LANG_TAG_RE = re.compile(
         r"(?i)[.\-_]("
-        r"jp[-_]?(?:sc|tc|chs|cht|gb|big5)"
+        r"(?:cn|tw|sc|tc|chs|cht|gb|big5|zh[-_]?(?:cn|tw|hans|hant))"
+        r"[-_](?:ja|jp|jpn|jap)"
+        r"|(?:ja|jp|jpn|jap)[-_](?:cn|tw|sc|tc|chs|cht|gb|big5)"
+        r"|jp[-_]?(?:sc|tc|chs|cht|gb|big5)"
         r"|zh[-_]?(?:cn|tw|hans|hant|sc|tc)"
         r"|chs|cht|sc|tc|jpn?|jap|ja|eng?|gb|big5"
         r"|简体|繁体|简日|繁日|简繁日|简繁|简|繁|双语|中字|中英|英字"
@@ -4221,6 +4328,12 @@ class Planner:
         注意：sc / chs / zh-Hans / 简 / 简体 都是「简体」的等价写法，
         zh-TW / cht / 繁 都是「繁体」。同一集里出现 zh-Hans 和 sc
         只是叫法不同，不算「多份不同字幕」。
+
+        「简体中文 + 日语」的组合有两种常见写法，都要认全：
+          · 前后缀型：JPSC / JPTC / 简日 / 繁日
+          · 双段型：CN-ja / TW-ja / SC-JP / ja-CN
+        后者以前只取到尾巴上的 ja，会让 CN-ja 与 TW-ja 都变成「日语」
+        而互相覆盖。
         """
         tag = cls._lang_suffix(stem).lower().replace("_", "-")
         if not tag:
@@ -4231,6 +4344,22 @@ class Planner:
             return "jp_s"
         if plain in ("jptc", "jp-tc", "jpt", "繁日"):
             return "jp_t"
+        # 双段型：CN-ja（简中+日语）、TW-ja（繁中+日语）。
+        # 也覆盖 zh_CN-ja → zh-cn-ja、zh-Hans-ja 这类带语言前缀的写法：
+        # 先把纯 "zh" 段排除，剩下的首尾两段才是有意义的简繁/日语标记。
+        parts = [p for p in plain.split("-") if p]
+        if len(parts) >= 2:
+            zh_s_set = {"cn", "sc", "chs", "gb", "hans"}
+            zh_t_set = {"tw", "tc", "cht", "big5", "hant"}
+            ja_set = {"ja", "jp", "jpn", "jap"}
+            cand = [p for p in parts if p != "zh"] or parts
+            a, b = cand[0], cand[-1]
+            for zh, other in ((a, b), (b, a)):
+                if other in ja_set:
+                    if zh in zh_s_set:
+                        return "jp_s"
+                    if zh in zh_t_set:
+                        return "jp_t"
         # 纯简 / 纯繁（等价写法归一到同一类）
         if plain in ("chs", "sc", "zh-cn", "zh-hans", "简", "简体",
                      "gb", "gbk"):

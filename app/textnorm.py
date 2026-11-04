@@ -71,14 +71,79 @@ def is_generic_episode_title(title: str) -> bool:
         r"\d+\s*화|\d+)", t))
 
 
+# 中文主名：开头的连续中文字符（≥2 字）。
+# 「进击的巨人 Shingeki no kyojin Kuriboh@Oure」→「进击的巨人」
+_RE_CJK_HEAD = re.compile(r"^[\u3400-\u9fff\u3040-\u30ff]{2,}")
+
+
+def cjk_head(title: str) -> str:
+    """取标题开头的中文/日文片段，用于判断是不是同一部作品。"""
+    t = unicodedata.normalize("NFKC", title or "").strip()
+    m = _RE_CJK_HEAD.match(t)
+    return m.group(0) if m else ""
+
+
+def _is_spinoff_pair(a: str, b: str) -> bool:
+    """两个标题是不是「同一主名 + 不同衍生作后缀」。
+
+    进击的巨人 / 进击的巨人 学园     → True（两部不同作品）
+    进击的巨人 / 进击的巨人 最终季   → False（同一部）
+    进击的巨人 / Shingeki no Kyojin  → False（不同语言的主名）
+    """
+    ha, hb = cjk_head(a), cjk_head(b)
+    if not ha or not hb or ha != hb:
+        return False
+    wa = _cjk_tail_word(a)
+    wb = _cjk_tail_word(b)
+    if not wa and not wb:
+        return False
+    # 只要有一边带「非分部说明」的中文尾巴，就当成不同作品
+    return bool(wa) or bool(wb)
+
+
 def titles_agree(a: str, b: str) -> bool:
     na, nb = norm_title(a), norm_title(b)
     if not na or not nb:
         return False
+    # 衍生作优先排除：「进击的巨人」vs「进击的巨人 学园」WRatio 有 83，
+    # 但它们是两部独立作品，必须先排除再走相似度。
+    if _is_spinoff_pair(a, b):
+        return False
     if fuzz.WRatio(na, nb) >= 80:
         return True
     shorter, longer = (na, nb) if len(na) <= len(nb) else (nb, na)
-    return len(shorter) >= 3 and shorter in longer
+    if len(shorter) >= 3 and shorter in longer:
+        return True
+    # 中文主名相同即视为同一部作品：季目录名里常带发布组、版本说明、
+    # 分部名（The Final Season / 雄辩的巨人 / Kuriboh@Oure），
+    # 整串比较会失败，但中文主名是可靠的同一性依据。
+    ha, hb = cjk_head(a), cjk_head(b)
+    if ha and hb and len(ha) >= 2 and len(hb) >= 2 and ha == hb:
+        return True
+    return False
+
+
+# 衍生作/续作常见写法：主名后紧跟中文词（不进空格算）
+_RE_CJK_TAIL = re.compile(r"^[\s._\-:：·]*([\u3400-\u9fff]{2,})")
+
+
+_RE_SEASON_WORD = re.compile(r"(?:最终季|剧场版|特别篇|番外|第[一二三四五六七八九十\d]+季)")
+
+
+def _cjk_tail_word(title: str) -> str:
+    """主名之后的中文尾巴；如果是分部说明则返回空串。"""
+    t = unicodedata.normalize("NFKC", title or "").strip()
+    m = _RE_CJK_HEAD.match(t)
+    if not m:
+        return ""
+    rest = t[m.end():]
+    tail = _RE_CJK_TAIL.match(rest)
+    if not tail:
+        return ""
+    word = tail.group(1)
+    if _RE_SEASON_WORD.search(word):
+        return ""
+    return word
 
 
 def strong_titles_agree(a: str, b: str) -> bool:
