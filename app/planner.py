@@ -904,30 +904,33 @@ class Planner:
     def _list(self, client, cid: str) -> list[P115Item]:
         return client.list_dir(cid)
 
+    # 这些是蓝光/影碟的结构目录，进去只会看到碎片文件，不当作剧集。
+    # 这是唯一还用名称判断的地方，因为它属于「文件系统结构」而非命名习惯。
+    _STRUCTURE_DIRS = ("BDMV", "VIDEO_TS", "CERTIFICATE", "STREAM",
+                       "PLAYLIST", "CLIPINF", "BDMV_STREAM", "HVDVD_TS")
+
     def _looks_like_nested_series(self, client, item: P115Item,
                                   root_title: str = "") -> bool:
         """合集根目录里的子目录是否像一个独立剧集/季目录。
 
-        只看直属视频里是否有至少两个集号文件，避免把字体、字幕、
-        花絮目录误当成剧集；也不进入 BDMV/VIDEO_TS 内部。
+        **纯内容判定：名称完全不参与**（root_title 参数仅为兼容保留）。
+
+        这是用户反复强调的原则：有视频的文件夹就该分析，判据只能是内容。
+        以前用「目录名含 Season/S1/TV…」或「与父标题相似」做否决，
+        导致 `日版TV`（含 26 集 S1E01~E26）这种目录被整块跳过。
+        靠往提示词里加词打补丁治标不治本，名字永远列不全。
+
+        现在的判断只用视频文件本身：
+          · 至少 2 个视频
+          · 其中带集号的 ≥ 2 个
+          · 带集号的占全部视频的一半以上
+        这样字体夹、花絮夹、单个宣传片都会被自然排除。
         """
         name = (item.name or "").strip()
-        if not name or item.name.upper() in (
-                "BDMV", "VIDEO_TS", "CERTIFICATE", "STREAM", "PLAYLIST",
-                "CLIPINF") or is_subs_dir(name) or is_part_dir(name) or \
-                is_season_dir(name):
+        if not name:
             return False
-        # 先按目录名做一层过滤：带 BDMV/Vol/Season 等介质提示，或与
-        # 合集根目录同属一部片。避免对“电影合集”里的每个子目录都发请求。
-        hint = bool(re.search(
-            r"(?i)BDMV|Blu-?ray|Vol(?:ume)?|Season|S\d{1,2}|"
-            r"第\s*\d+\s*季|Cour|Part|OVA|OAD", name))
-        child_title = parse_name(name, is_dir=True).title
-        same_show = bool(
-            root_title and child_title and
-            fuzz.WRatio(norm_title(root_title), norm_title(child_title))
-            >= 60)
-        if not hint and not same_show:
+        # 结构目录直接跳过（不是命名习惯问题，是文件系统结构）
+        if item.name.upper() in self._STRUCTURE_DIRS:
             return False
         try:
             children = self._list(client, item.fid)
@@ -936,9 +939,15 @@ class Planner:
         videos = [c for c in children if c.is_video]
         if len(videos) < 2:
             return False
-        episodic = sum(1 for c in videos
-                       if parse_name(c.name).episode is not None)
-        return episodic >= 2 and episodic >= len(videos) * 0.5
+        episodic = 0
+        for c in videos:
+            if parse_name(c.name).episode is not None:
+                episodic += 1
+        ok = episodic >= 2 and episodic >= len(videos) * 0.5
+        if ok:
+            self.log(f"「{name}」内含 {episodic} 个带集号的视频"
+                     f"（共 {len(videos)} 个），按剧集分析。")
+        return ok
 
     def _discover(self, client, dir_item: P115Item,
                   depth: int = 0) -> list[MediaRoot]:
