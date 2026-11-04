@@ -60,6 +60,34 @@ GENERIC_DIR_NAMES = {
     "anime", "tv", "shows", "show", "movies", "movie", "downloads",
     "video", "videos", "media", "library", "others", "unsorted",
 }
+# 「版本说明」类目录名：描述的是「这一份拷贝是什么版本」，不是作品名。
+#    日版TV / 美版 / 正片 / 无修版 / 内嵌字幕 / BDRip / 1080p 版 …
+# 这类目录必须向上取父目录的片名，否则会拿「日版TV」去搜元数据，
+# 四个来源全空，最后把文件名改成「日版TV.S01E01」。
+RE_VERSION_DESC_DIR = re.compile(
+    r"(?i)^[\s\[【(（]*"
+    r"(?:日版|美版|英版|台版|港版|韩版|国版|大陆版|粤版"
+    r"|正片|本篇|本編|正剧|正劇"
+    r"|无修|無修|无删减|無刪減|未删减|完整版|完全版|导演剪辑版"
+    r"|内嵌|內嵌|内封|外挂|外掛|硬字幕|软字幕"
+    r"|tv|tv版|movie版|剧场版|劇場版"
+    r"|bd(?:rip|remux)?|web(?:-?dl|rip)?|hdtv|dvd(?:rip)?"
+    r"|\d{3,4}[pi]|4k|8k|uhd|hdr"
+    r"|repack|remux|proper|v\d"
+    r"|字幕组|字幕組|压制|壓制"
+    r")"
+    r"(?:[\s\]]*(?:版|版本|tv|rip|remux|字幕|版\d*)?)?"
+    r"[\s\]】)）]*$")
+
+
+def _is_version_desc_dir(name: str) -> bool:
+    """目录名是否只是「版本说明」，不是作品名。"""
+    t = unicodedata.normalize("NFKC", (name or "").strip())
+    if not t:
+        return False
+    return bool(RE_VERSION_DESC_DIR.match(t))
+
+
 GENERIC_HINTS = ("新番", "合集", "系列", "其他", "其它", "番剧", "电视剧",
                  "国产动画", "动漫", "美漫", "美国动画", "美国动漫",
                  "欧美动画")
@@ -1166,7 +1194,8 @@ class Planner:
         # 本身不是片名：当成片名去搜会命中「万圣街特别篇」这类无关条目，
         # 而且会让父目录里的 [tmdbid-xxxx] 被 ID 校验过滤掉。
         current_generic = (_is_generic_dir(current_name) or
-                           is_specials_dir(current_name))
+                           is_specials_dir(current_name) or
+                           _is_version_desc_dir(current_name))
         # “S1替换双语字幕”是季目录+说明；“S1东离剑游记”虽然也带 S1，
         # 但后缀是真正的片名，要保留。只有后缀全是说明时才清空。
         season_desc = is_season_dir(current_name) and \
