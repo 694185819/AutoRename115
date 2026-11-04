@@ -500,9 +500,12 @@ RE_PART_SUFFIX = re.compile(
     r"(?i)[\s._\-·:：]*(?:"
     r"(?:上|下|中)\s*(?:部|篇|集|卷)?"
     r"|(?:前|后|後)\s*(?:篇|编|編|部分|半)"
-    r"|(?:part|vol(?:ume)?|disc|dvd|bd)\s*[._\-]?\s*(?:[0-9]+|[ivxlcdm]+|one|two|three|four)"
+    # 不能把 bd 放进来：[BD-REMUX]/[BDRip] 里的 BD 会被当成「蓝光碟编号」，
+    # 整个剧集根目录都会被判成分部目录。
+    r"|(?:part|vol(?:ume)?|disc|dvd)\s*[._\-]?\s*(?:[0-9]+|[ivxlcdm]+|one|two|three|four)"
     r"|第\s*[一二三四五六七八九十0-9]+\s*(?:部|篇|部分|章)"
-    r"|(?:season|シーズン)\s*[0-9]+"
+    # 注意：这里不能加 season/シーズン——季号由 is_season_dir 负责，
+    # 混进来会把「...kyojin.Season3」误判成分部，导致该季整个消失。
     r")\s*$")
 
 
@@ -510,12 +513,15 @@ def is_part_dir(name: str) -> bool:
     norm = unicodedata.normalize("NFKC", (name or "").strip())
     if PART_RE.match(norm):
         return True
-    # 带剧名前缀的分部；要求去掉后缀后还剩至少 2 个字，避免把
-    # 片名本身就叫「上下」的作品误判（那种会被 PART_RE 抓走）
-    core = RE_PART_SUFFIX.sub("", norm).strip(" ._-[]()（）【】")
-    if core and core != norm and len(core) >= 2:
-        return True
-    return False
+    # 带剧名前缀的分部：「进击的巨人 上」「XX Part 1」。
+    # 必须用 search 拿到真实匹配再判断，不能用「sub 之后字符串变了」
+    # 当条件——strip() 本身就会剥掉首尾括号，让正常目录名误判。
+    m = RE_PART_SUFFIX.search(norm)
+    if not m:
+        return False
+    head = norm[:m.start()].strip(" ._-[]()（）【】")
+    # 前面还得有真正的片名，避免把「上下」这种纯分部名重复判断
+    return len(head) >= 2
 
 
 def is_subs_dir(name: str) -> bool:
@@ -3950,7 +3956,22 @@ class Planner:
                 self._mark(plan, qc.name_source_no_episodes(label))
 
         # 季目录重命名（纯字幕目录 ass/sup/subs 等不参与，不当季目录处理）
-        if self.options.rename_season_folders and mr.season_dirs:
+        # 只在「本次分析的目录就是这部作品的主目录」时才改季目录。
+        # 分析某个季子目录（如「进击的巨人 S4[...最终季]」「Specials」）时，
+        # mr.season_dirs 仍会带上同级的其他季，无差别改名会改到别人的目录。
+        _self_in_seasons = any(
+            sd.fid == mr.item.fid for sd in mr.season_dirs)
+        _self_is_season = is_season_dir(mr.item.name) or \
+            is_part_dir(mr.item.name) or is_specials_dir(mr.item.name)
+        _may_rename_seasons = not (
+            _self_in_seasons or _self_is_season or mr.root_season is not None)
+        if not _may_rename_seasons and mr.season_dirs:
+            notes.append(
+                "当前分析的是某一季/分部目录，已跳过季目录改名"
+                "（避免改动同级的其他季）。")
+
+        if self.options.rename_season_folders and mr.season_dirs and \
+                _may_rename_seasons:
             seen: dict[int, int] = {}
             for sd in mr.season_dirs:
                 if is_subs_dir(sd.name):
@@ -4114,7 +4135,14 @@ class Planner:
                 plan.multi_sub_mode = ""
 
         # 剧集文件夹
-        if plan.rename_root and not plan.context.get("is_container"):
+        _self_season = (season_from_dir(mr.item.name)
+                        if mr.item.is_dir else None)
+        _self_is_plain_season = (
+            mr.item.is_dir and _self_season is not None and
+            (is_season_dir(mr.item.name) or looks_like_season_dir(mr.item.name)
+             or is_specials_dir(mr.item.name)))
+        if plan.rename_root and not plan.context.get("is_container") and \
+                not _self_is_plain_season:
             ident = plan.identity
             folder_name = self._folder_name(
                 plan, title, year, ident.imdb_id, ident.tmdb_id)
@@ -4122,6 +4150,18 @@ class Planner:
                 ops.insert(0, RenameOp(fid=mr.item.fid, old_name=mr.item.name,
                                        new_name=folder_name, is_dir=True,
                                        role="show", parent_id=mr.item.parent_id))
+        elif _self_is_plain_season and self.options.rename_season_folders:
+            # 选中的本身就是某一季的目录（Season 04 / Specials / S4...）：
+            # 按季节改名为 Season NN / Specials，不能改成剧集文件夹名
+            # ——那会和父目录撞名。
+            target = "Specials" if _self_season == 0 else \
+                f"Season {_self_season:02d}"
+            if mr.item.name != target:
+                ops.insert(0, RenameOp(fid=mr.item.fid,
+                                       old_name=mr.item.name,
+                                       new_name=target, is_dir=True,
+                                       role="season",
+                                       parent_id=mr.item.parent_id))
         elif mr.item.is_dir and is_specials_dir(mr.item.name) and \
                 self.options.rename_season_folders:
             # 选中的本身就是「特别篇」容器目录：它是第 0 季，
