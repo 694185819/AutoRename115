@@ -4314,16 +4314,20 @@ class Planner:
     # 「繁日 JPTC」会被改成同一个名字而互相覆盖。
     # 先匹配「限定词 + 日军标记」的完整组合（CN-ja / TW-ja / SC-JP …），
     # 否则会只取到尾巴上的 ja，让简体日字与繁体日字重名。
+    # 语言标记之间的连接符：- _ & + . （chs&jpn / jpsc+chs / zh.cn.ja）
+    _LANG_SEP = r"[-_&+.]"
     _LANG_TAG_RE = re.compile(
-        r"(?i)[.\-_]("
-        r"(?:cn|tw|sc|tc|chs|cht|gb|big5|zh[-_]?(?:cn|tw|hans|hant))"
-        r"[-_](?:ja|jp|jpn|jap)"
-        r"|(?:ja|jp|jpn|jap)[-_](?:cn|tw|sc|tc|chs|cht|gb|big5)"
-        r"|jp[-_]?(?:sc|tc|chs|cht|gb|big5)"
-        r"|zh[-_]?(?:cn|tw|hans|hant|sc|tc)"
+        r"(?i)[.\-_&+]("
+        r"(?:cn|tw|sc|tc|chs|cht|gb|big5|zh" + _LANG_SEP + r"?(?:cn|tw|hans|hant))"
+        r"(?:" + _LANG_SEP + r"|&|\+)"
+        r"(?:ja|jp|jpn|jap|chs|cht|sc|tc|gb|big5)"
+        r"|(?:ja|jp|jpn|jap)(?:" + _LANG_SEP + r"|&|\+)"
+        r"(?:cn|tw|sc|tc|chs|cht|gb|big5)"
+        r"|jp" + _LANG_SEP + r"?(?:sc|tc|chs|cht|gb|big5)"
+        r"|zh" + _LANG_SEP + r"?(?:cn|tw|hans|hant|sc|tc)"
         r"|chs|cht|sc|tc|jpn?|jap|ja|eng?|gb|big5"
         r"|简体|繁体|简日|繁日|简繁日|简繁|简|繁|双语|中字|中英|英字"
-        r")(?=[.\-_]|$)")
+        r")(?=[.\-_&+]|$)")
 
     @classmethod
     def _lang_suffix(cls, stem: str) -> str:
@@ -4415,7 +4419,9 @@ class Planner:
         后者以前只取到尾巴上的 ja，会让 CN-ja 与 TW-ja 都变成「日语」
         而互相覆盖。
         """
-        tag = cls._lang_suffix(stem).lower().replace("_", "-")
+        tag = cls._lang_suffix(stem).lower()
+        for sep in ("_", "&", "+", "."):
+            tag = tag.replace(sep, "-")
         if not tag:
             return "unknown"
         plain = tag.lstrip(".-")
