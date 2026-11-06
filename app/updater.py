@@ -19,7 +19,7 @@ from urllib.parse import quote, unquote
 
 import requests
 
-APP_VERSION = "0.45"
+APP_VERSION = "0.46"
 # 安装包发布仓库（公开，只放 exe）；源码仓库单独一个。
 REPO_SLUG = "694185819/AutoRename115-release"
 REPO_URL = f"https://github.com/{REPO_SLUG}"

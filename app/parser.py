@@ -33,6 +33,10 @@ def _season_digits(raw: str) -> int:
     return int(text) if text.isdigit() else 0
 RE_SEASON_CN = re.compile(r"第\s*([0-9零一二两三四五六七八九十]+)\s*季")
 RE_SEASON_EN = re.compile(r"(?i)(?<![A-Za-z])Season\s*(\d{1,2})(?![0-9])")
+# 序数词在前的写法：1st/2nd/3rd/4th Season（日式发布常见）
+RE_SEASON_ORDINAL = re.compile(
+    r"(?i)(?<![A-Za-z0-9])(\d{1,2})(?:st|nd|rd|th)\s*Season(?![A-Za-z])")
+# 日文「第3期」「第3シーズン」在文件名里的写法由 RE_SEASON_CN / RE_JP 处理
 RE_SEASON_S = re.compile(r"(?i)(?<![A-Za-z0-9])S(\d{1,2})(?![0-9E])")
 # 罗马数字季/部：第Ⅱ季、Season II、Show II.2019.EP01
 RE_SEASON_ROMAN_CN = re.compile(r"第\s*([IVXLCDM]{1,6})\s*[季期部]")
@@ -51,7 +55,11 @@ RE_EP_EN = re.compile(
 RE_EP_BRACKET = re.compile(
     r"[\[【(（]\s*(\d{1,4})(?:\s*[-~]\s*(\d{1,4}))?(?:v\d+)?\s*[\]】)）]")
 RE_EP_DASH = re.compile(
-    r"(?:^|[\s._])(?:-|–|—)\s*(\d{1,4})(?:\s*[-~]\s*(\d{1,4}))?(?:v\d+)?"
+    # 「 - 49」「 - E49」「 - EP49」都算集号：日式发布常见
+    # 「片名 3rd Season - E49」，以前 E 前缀识别不出来，
+    # 整批文件被判成电影。
+    r"(?:^|[\s._])(?:-|–|—)\s*E?P?\s*(\d{1,4})"
+    r"(?:\s*[-~]\s*E?P?\s*(\d{1,4}))?(?:v\d+)?"
     r"(?=$|[\s._\[\]()]|\.[A-Za-z0-9]{2,4}$)")
 RE_EP_TRAIL = re.compile(
     r"(?:^|[\s._])(\d{1,4})(?:v\d+)?(?:\s*[-~]\s*(\d{1,4}))?\s*$")
@@ -296,6 +304,11 @@ def _norm_text(text: str) -> str:
 
 def _is_part_number(text: str, match) -> bool:
     """`Part.2` / `Vol.2` / `Disc 2` / `Season 2` 里的数字不是集数。"""
+    matched = match.group(0)
+    # 匹配本身带 E 前缀（E49 / EP49 / - E49）时，它就是集号，
+    # 即便前面出现过 Season：`... 3rd Season - E49` 里的 49 是第 49 集。
+    if re.search(r"(?i)\bE(?:P|pisode)?\s*[._ -]?\s*\d", matched):
+        return False
     prefix = text[max(0, match.start() - 16):match.start()]
     # 末尾单独一个 S 才是 Season 简写；不能把 Highness 的 s 当成 S。
     return bool(re.search(
@@ -452,7 +465,7 @@ def parse_name(raw: str, is_dir: bool = False,
         if not m:
             m = RE_SEASON_ROMAN_CN.search(work)
         if not m:
-            m = RE_SEASON_EN.search(work)
+            m = RE_SEASON_EN.search(work) or RE_SEASON_ORDINAL.search(work)
         if not m:
             m = RE_SEASON_ROMAN_EN.search(work)
         if not m:

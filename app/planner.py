@@ -1976,6 +1976,14 @@ class Planner:
                           file_season=season_from_file,
                           imdb_id=chain_imdb, tmdb_id=chain_tmdb)
 
+    @property
+    def _current_entries(self):
+        return getattr(self, "_entries_cache", [])
+
+    @_current_entries.setter
+    def _current_entries(self, value):
+        self._entries_cache = list(value or [])
+
     def _match(self, parsed: ParsedName, media_type: str,
                category_hint: str = "") -> MatchResult:
         try:
@@ -1984,7 +1992,116 @@ class Planner:
             self.log(f"元数据搜索失败：{parsed.title}：{e}")
             return MatchResult()
         self._trace_match(parsed, res)
+        fixed = self._retry_with_file_title(parsed, media_type,
+                                            category_hint, res)
+        if fixed is not None:
+            res = fixed
+        self._verify_match_titles(parsed, res)
         return res
+
+    def _retry_with_file_title(self, parsed: ParsedName, media_type: str,
+                               category_hint: str,
+                               res: MatchResult) -> "MatchResult | None":
+        """匹配结果与本地片名不符时，换一个片名重搜一次。
+
+        `parsed.local_titles` 是文件名里出现的片名（比目录名可信：
+        目录常常只写「S1」）。若结果与它们都对不上，就用其中最长的一个
+        再搜一次，能搜到对得上的就用新的。
+        """
+        title = (parsed.title or "").strip()
+        if not title or not res or not res.confidence:
+            return None
+        titles = [t for t in self._match_titles(res) if t]
+        if not titles or any(titles_agree(title, t) for t in titles):
+            return None      # 名称对得上，不用重搜
+
+        # 候选来源 1：本条解析结果里带的文件名片名（最可信）
+        candidates: list[str] = []
+        def _usable(cand: str) -> bool:
+            """能否作为「换一个词重搜」的候选。
+
+            只排除与 title 完全相同的。不能用 titles_agree 过滤——
+            「关于我转生… 転生したらスライムだった件」与
+            「転生したらスライムだった件」是包含关系，titles_agree 判 True，
+            但后者才是真正的作品名，用它搜才命中正传。
+            """
+            c = str(cand or "").strip()
+            return bool(c) and c != title and len(c) >= 2
+
+        for t in (getattr(parsed, "local_titles", None) or []):
+            if _usable(t):
+                candidates.append(t)
+        # 目录层的其它写法
+        for q in (parsed.queries or []):
+            if _usable(q):
+                candidates.append(q)
+        # 视频文件名里的片名（最可信：目录名可能只有「S1」，
+        # 而文件名通常写着完整作品名）
+        try:
+            for e in (self._current_entries or []):
+                if not e.is_video:
+                    continue
+                if _usable(getattr(e.parsed, "title", "")):
+                    candidates.append(str(e.parsed.title).strip())
+        except Exception:      # noqa: BLE001
+            pass
+        if not candidates:
+            self.log(f"[标题校验] 本地「{title}」没有其它可用的片名候选，跳过重搜。")
+            return None
+        # 从长到短试，最多两次，避免请求过多
+        candidates = sorted(set(candidates), key=len, reverse=True)[:2]
+        for alt in candidates:
+            try:
+                probe = ParsedName(
+                    raw=alt, title=alt, queries=[alt],
+                    year=parsed.year, season=parsed.season)
+                again = self.metadata.match(probe, media_type, category_hint)
+            except Exception as e:      # noqa: BLE001
+                self.log(f"[标题校验] 用「{alt}」重搜失败：{e}")
+                continue
+            if not again or not again.confidence:
+                continue
+            new_titles = [t for t in self._match_titles(again) if t]
+            if any(titles_agree(alt, t) for t in new_titles):
+                again.notes.append(
+                    f"原匹配「{titles[0]}」与本地片名不符，"
+                    f"已改用「{alt}」重搜并命中「{new_titles[0]}」。")
+                self.log(f"[标题校验] 用「{alt}」重搜命中「{new_titles[0]}」，"
+                         f"已替换原结果。")
+                return again
+            self._trace_match(probe, again)
+        return None
+
+    def _verify_match_titles(self, parsed: ParsedName,
+                             res: MatchResult) -> None:
+        """核对匹配结果的标题与本地片名是否对得上。
+
+        元数据站点常把外传/续作/同名作品排在前面：
+            《転生したらスライムだった件》（正传）
+            《転スラ日記》（外传）
+        本地叫正传，返回的却是外传——这种情况必须降级成「需确认」，
+        不能让程序拿着外传的标题去改正传的文件名。
+        """
+        local = (parsed.title or "").strip()
+        if not local or not res or not res.confidence:
+            return
+        titles = [t for t in self._match_titles(res) if t]
+        if not titles:
+            return
+        # 任何一个名称/别名与本地对得上，就认为没错配
+        for t in titles:
+            if titles_agree(local, t):
+                return
+        # 全都对不上：压到阈值以下，强制人工确认
+        old = res.confidence
+        res.confidence = min(old, 0.30)
+        got = " / ".join(titles[:3])
+        res.notes.append(
+            f"匹配到的条目与本地片名不一致：本地「{local}」，"
+            f"匹配「{got}」。可能命中了外传/同名作品，请手动核对。")
+        self.log(
+            f"[标题校验] 本地「{local}」与匹配结果「{got}」不一致，"
+            f"置信度 {old * 100:.0f}% → 30%，已标记需确认。")
 
     @staticmethod
     def _cand_brief(cand: Optional[Candidate]) -> str:
@@ -2566,6 +2683,38 @@ class Planner:
                           if s > 0 and c > 0)
         return positive[0] if positive else (None, 0)
 
+    def _cumulative_offset(self, season: int, eps: list[int],
+                           counts: dict[int, int]) -> int:
+        """判断某季是否用了累计集号，返回需要减掉的偏移量（0 表示不改）。
+
+        例：第 2 季 TMDB 24 集，文件却是 E25~E48（第 1 季 24 集之后的
+        累计编号），此时偏移 24 → E01~E24。
+
+        只有全部条件满足才返回非零，宁可少改也不改错：
+          1. 该季有明确集数
+          2. 集号全部越界（不是个别文件写错）
+          3. 集号数量不超过本季集数
+          4. 最小集号减偏移后正好是 1
+        """
+        count = counts.get(season) or 0
+        if not count or not eps:
+            return 0
+        uniq = sorted(set(eps))
+        if len(uniq) < 2:          # 只 1 个文件不足以判断，避免误判
+            return 0
+        if min(uniq) <= count:     # 还有集号在本季范围内 → 不是纯累计
+            return 0
+        if len(uniq) > count:      # 比本季集数还多 → 不像单季
+            return 0
+        # 累计起点 = 前面所有季的集数之和
+        prior = sum(c for s2, c in counts.items()
+                    if 0 < s2 < season and c > 0)
+        if prior and min(uniq) - prior == 1:
+            return prior
+        # 没有前置季信息时，按「最小集号 - 1」推断
+        off = min(uniq) - 1
+        return off if off > 0 else 0
+
     def _tmdb_absolute_hint(self, ep: Optional[int],
                             counts: dict[int, int]) -> bool:
         """没有季标记、但集号超过 TMDB 第一季集数：疑似总集编号。
@@ -2685,6 +2834,7 @@ class Planner:
                          "anime" if path_anime and not path_tv else "")
         # 原目录已经写了中文名 + 日文名 + 年份 + ID 时，直接本地组结果，
         # 不再访问 Bangumi/IMDb/TMDB。容器目录（一个目录里多部剧）不走此路径。
+        self._current_entries = list(entries)
         local = self._local_names(mr, folder_parsed, parsed, entries)
         has_id = bool(local["imdb"] or local["tmdb"])
         id_match = None
@@ -3927,18 +4077,42 @@ class Planner:
                 f"{first_season_count} 集；可能是总集编号，已暂停集数改名，"
                 "请手动选择季。")
 
-        # 明确写了 Sxx 时也做一次校验；这里只提示，不阻止用户手动应用。
+        # 明确写了 Sxx 时做集数校验；能确定是「累计集号」时自动纠正。
         if season_counts:
             by_season: dict[int, list[int]] = {}
             for _, season, ep, _, _ in resolved:
                 if season is not None and ep is not None:
                     by_season.setdefault(season, []).append(ep)
+            # 逐季判断是否需要「累计集号 → 本季集号」的偏移纠正
+            offsets: dict[int, int] = {}
             for season, eps in sorted(by_season.items()):
                 count = season_counts.get(season)
-                if count and max(eps) > count:
+                if not count:
+                    continue
+                uniq = sorted(set(eps))
+                if max(uniq) <= count:
+                    continue        # 本季范围内，不用改
+                off = self._cumulative_offset(season, uniq, season_counts)
+                if off:
+                    offsets[season] = off
+                    notes.append(
+                        f"第 {season} 季的集号是累计编号（E{uniq[0]:02d}~"
+                        f"E{uniq[-1]:02d}），已按 TMDB 本季 {count} 集"
+                        f"自动换算为 E{uniq[0] - off:02d}~"
+                        f"E{uniq[-1] - off:02d}。")
+                else:
                     notes.append(
                         f"TMDB 第 {season} 季共 {count} 集，本任务出现 "
-                        f"E{max(eps):02d}；请核对是否混入其他季或使用总集编号。")
+                        f"E{max(uniq):02d}；请核对是否混入其他季或使用总集编号。")
+            if offsets:
+                # 就地改写 resolved 里的集号，后续所有改名都用换算后的值
+                resolved = [
+                    (e, season, (ep - offsets[season])
+                     if (season in offsets and ep is not None) else ep,
+                     ep_end, confirmed)
+                    for e, season, ep, ep_end, confirmed in resolved]
+                plan.episodes = sorted(
+                    {ep for _, _, ep, _, _ in resolved if ep is not None})
 
         # 电视剧/国产动画/美漫/欧美动画：中文名.来源名.SxxExx.副标题 [规格]
         english_title = ""
