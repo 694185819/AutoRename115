@@ -397,6 +397,52 @@ def is_season_dir(name: str) -> bool:
         is_specials_dir(name)
 
 
+# 规格片段：去掉它们后如果什么都不剩，说明这个名字「只有季号和规格」，
+# 没有作品名。例：
+#   "Season 01 [1080p]"  → 只剩 Season 01        → 纯季目录
+#   "度华年,The.Princess.Royal.S01.2024.2160p..."   → 剩「度华年,The Princess Royal」
+#                                                  → 有作品名，不是纯季目录
+_RE_SPEC_CHUNK = re.compile(
+    r"(?i)\b2160p|1080p|720p|480p|4k|8k|uhd|hdr|hdr10|dolby|dv|"
+    r"web-?dl|webrip|blu-?ray|bdrip|bdremux|remux|hdtv|dvdrip|"
+    r"x26[45]|h\.?26[45]|10bit|8bit|hi10p|hevc|avc|"
+    r"aac|ac3|eac3|dts(?:-hd)?|truehd|atmos|flac|opus|"
+    r"ddp?5\.1|ddp?\d\.\d|60fps|\d{2,3}fps|hq|multi|"
+    r"简繁|简日|繁日|中字|双语|内封|外挂")
+_RE_YEAR_CHUNK = re.compile(r"\b(?:19|20)\d{2}\b")
+# 发布组：末尾的 -GROUP 或 [GROUP]
+_RE_GROUP_CHUNK = re.compile(r"(?:[-\s]\[?[A-Za-z0-9]{2,15}\]?)$")
+
+
+def _is_pure_season_dir(name: str) -> bool:
+    """目录名是否「只有季号，没有作品名」。
+
+    只有这种目录才会被改成 Season NN。带作品名的（哪怕同时含 S01）
+    必须走正常剧集文件夹改名，否则作品名会被抹掉。
+    """
+    norm = unicodedata.normalize("NFKC", (name or "").strip())
+    if not norm:
+        return False
+    # 显式的纯季目录写法（Season 01 / S01 / 第二季 / 1st Season）
+    if is_season_dir(norm):
+        return True
+    # 其它带季号的写法：去掉季号、规格、年份、发布组之后，
+    # 如果还剩至少 2 个字母/汉字，说明是作品名，不是纯季目录
+    rest = norm
+    # 去掉季号本身
+    rest = re.sub(r"(?i)(?:s|season|series)\s*0?\d{1,2}", " ", rest)
+    rest = re.sub(r"\\u7b2c\\s*[0-9\\u96f6\\u4e00\\u4e8c\\u4e24\\u4e09\\u56db\\u4e94\\u516d\\u4e03\\u516b\\u4e5d\\u5341]+\\s*[\\u5b63\\u671f\\u90e8]", " ", rest)
+    rest = re.sub(r"(?i)\b\d{1,2}(?:st|nd|rd|th)\s*season\b", " ", rest)
+    rest = re.sub(r"(?i)第\s*\d+\s*[季期部]", " ", rest)
+    # 去掉规格、年份、发布组
+    rest = _RE_SPEC_CHUNK.sub(" ", rest)
+    rest = _RE_YEAR_CHUNK.sub(" ", rest)
+    rest = re.sub(r"[\[\]【】()（）{}._,\-、:：·\s]+", " ", rest).strip()
+    rest = _RE_GROUP_CHUNK.sub("", rest).strip()
+    # 剩下来的如果只有 1 个字符或全空 → 纯季目录
+    return len(re.sub(r"[^0-9A-Za-z\u4e00-\u9fff\u3040-\u30ff]", "", rest)) < 2
+
+
 def _embedded_season(name: str) -> Optional[int]:
     """从“Overlord 2015 S01 JPN Blu-ray”这种带前缀的名字里取季号。"""
     name = unicodedata.normalize("NFKC", (name or "").strip())
@@ -4351,10 +4397,25 @@ class Planner:
         # 剧集文件夹
         _self_season = (season_from_dir(mr.item.name)
                         if mr.item.is_dir else None)
+        # 父目录是否已经是同一部作品。是的话，本目录是它的季子目录，
+        # 只能改成 Season NN；否则本目录是作品根目录，要改成剧集文件夹名。
+        _parent_is_same_show = False
+        try:
+            _anc = list(mr.item.ancestors or [])
+            if _anc and title:
+                _pq = parse_name(_anc[-1], is_dir=True).title
+                _parent_is_same_show = bool(
+                    _pq and titles_agree(_pq, title))
+        except Exception:      # noqa: BLE001
+            _parent_is_same_show = False
         _self_is_plain_season = (
             mr.item.is_dir and _self_season is not None and
-            (is_season_dir(mr.item.name) or looks_like_season_dir(mr.item.name)
-             or is_specials_dir(mr.item.name)))
+            (_is_pure_season_dir(mr.item.name) or
+             is_specials_dir(mr.item.name) or
+             # 带作品名的季子目录：父目录就是这部作品时才当季目录
+             (_parent_is_same_show and
+              (looks_like_season_dir(mr.item.name) or
+               is_season_dir(mr.item.name)))))
         if plan.rename_root and not plan.context.get("is_container") and \
                 not _self_is_plain_season:
             ident = plan.identity
