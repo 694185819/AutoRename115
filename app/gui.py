@@ -3262,8 +3262,14 @@ class App(tk.Tk):
         except Exception:
             return b""
 
-    def _prepare_nfo_task(self, plan: PlanItem, progress=None) -> dict:
-        """获取资料、生成待上传文件，并找出已有 NFO/图片。"""
+    def _prepare_nfo_task(self, plan: PlanItem, progress=None,
+                          auto: bool = True) -> dict:
+        """获取资料、生成待上传文件，并找出已有 NFO/图片。
+
+        auto=True 是「改名后自动存」，只处理预览里勾选的项目；
+        auto=False 是「手动点保存 NFO/图片」，处理任务的**全部**项目
+        ——用户手动补资料时，不该被预览勾选状态拦住。
+        """
         def report(text: str) -> None:
             if progress:
                 progress(0, 0, text)
@@ -3292,9 +3298,10 @@ class App(tk.Tk):
                 fanart = data
         if not fanart:
             fanart = poster
-        # NFO 也只跟随预览里勾选的项目；未勾选的视频/目录不生成/不改 NFO。
+        # 自动保存时只跟随预览里勾选的项目；手动保存时用全部项目。
         nfo_plan = copy.copy(plan)
-        nfo_plan.ops = [op for op in plan.ops if op.selected]
+        nfo_plan.ops = ([op for op in plan.ops if op.selected]
+                        if auto else list(plan.ops))
         selected_fids = {op.fid for op in nfo_plan.ops
                          if not op.is_dir and op.role in ("episode", "movie")}
         if isinstance(plan.context, dict):
@@ -3394,8 +3401,9 @@ class App(tk.Tk):
                 "uploads": uploads, "skipped": skipped, "units": units,
                 "local": bool(self.is_local)}
 
-    def _save_nfo_task(self, plan: PlanItem, progress=None) -> dict:
-        prep = self._prepare_nfo_task(plan, progress)
+    def _save_nfo_task(self, plan: PlanItem, progress=None,
+                       auto: bool = True) -> dict:
+        prep = self._prepare_nfo_task(plan, progress, auto=auto)
         return self._finish_nfo_task(prep, progress)
 
     def _save_nfo_batch(self, plans: list[PlanItem], progress=None,
@@ -3477,7 +3485,7 @@ class App(tk.Tk):
         def task():
             return self._save_nfo_task(
                 p, progress=lambda d, t, m: self.post(
-                    "progress", (d, t, m)))
+                    "progress", (d, t, m)), auto=False)
 
         self.run_async(task, "nfo_save", determinate=True)
 
