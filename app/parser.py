@@ -148,8 +148,14 @@ TAG_PATTERNS = [
     r"LPCM|PCM|MP3|Opus)(?![A-Za-z])",
     # 单独出现的声道（例如 TrueHD.Atmos.7.1 里的 7.1）
     r"(?i)(?<![0-9])(?:[257]\.1(?:\.\d)?|6\.1|[1-6]\.0)(?![0-9])",
+    # 多语言连写：简繁英 / 简繁日 / 简英 / 繁英 / 中日英 …
+    # 必须放在单个语言标记之前，否则「简繁英」只会被剥掉「简繁」，
+    # 剩下的「英」会并进片名（复仇的安魂曲 → 复仇的安魂曲 英）。
+    r"(?i)(?<![A-Za-z0-9])[简繁日英中]{2,4}(?![A-Za-z0-9㐀-鿿])",
     r"(?i)(?<![A-Za-z0-9])(?:CHS|CHT|GB|BIG5|JPN|JPSC|简体|繁体|简繁|简日|繁日|简繁日|"
     r"双语|中字|内封|外挂|无字)(?![A-Za-z0-9])",
+    # 短发布组后缀：.NF / -NF / [NF]（NF = Netflix 源常见标记）
+    r"(?i)(?<=[.\-\[\s])(?:NF|AMZN|DSNP|HMAX|ATVP|iT|PCOK|STAN)(?=$|[.\-\]\s])",
     # 发布地区码（Big.Fish...2016.GBR.1080p）：不是片名的一部分
     r"(?i)(?<![A-Za-z0-9])(?:GBR|USA|JPN|CHN|HKG|TWN|KOR|FRA|GER|DEU|"
     r"ITA|ESP|AUS|CAN|IND|RUS|NZL|SWE|NOR|DEN|FIN|NLD|BEL|SUI|AUT|"
@@ -208,6 +214,15 @@ def _is_likely_tag(text: str) -> bool:
         return True
     if re.fullmatch(r"(?:中?文字幕|字幕|字幕文件|内封字幕|外挂字幕)", low):
         return True
+    # ── 先按「片段性质」判断，不依赖词表 ──
+    try:
+        from .naming_split import (CLASSIFY_LANG, CLASSIFY_SPEC,
+                                   CLASSIFY_YEAR, classify_kind)
+        kind = classify_kind(low)
+        if kind in (CLASSIFY_LANG, CLASSIFY_SPEC, CLASSIFY_YEAR):
+            return True
+    except Exception:      # noqa: BLE001
+        pass
     for rx in RE_TAGS:
         if rx.search(low):
             return True

@@ -269,7 +269,7 @@ class MetadataClient:
     # ------------------------------------------------------------ 豆瓣
     def _douban_html_search(self, query: str) -> list[Candidate]:
         if getattr(self, "offline", False):
-            return None
+            return []
         """subject_suggest 只给 1-2 季时，从豆瓣搜索页补全四季。"""
         self._wait("douban")
         r = self.session.get(
@@ -313,7 +313,7 @@ class MetadataClient:
 
     def search_douban(self, query: str) -> list[Candidate]:
         if getattr(self, "offline", False):
-            return None
+            return []
         query = query.strip()
         if not query:
             return []
@@ -732,7 +732,7 @@ class MetadataClient:
     def _details_douban(self, sid: str, fallback_poster: str = "",
                         kind: str = "tv") -> dict:
         if getattr(self, "offline", False):
-            return None
+            return []
         key = f"details2:douban:{sid}"
         cached = self._cache_get(key, 7 * 86400)
         if cached is not None:
@@ -857,7 +857,7 @@ class MetadataClient:
 
     def _details_imdb(self, sid: str) -> dict:
         if getattr(self, "offline", False):
-            return None
+            return []
         key = f"details:imdb:{sid}"
         cached = self._cache_get(key, 7 * 86400)
         if cached is not None:
@@ -1008,7 +1008,7 @@ class MetadataClient:
 
     def fetch_image(self, url: str) -> bytes:
         if getattr(self, "offline", False):
-            return None
+            return []
         if not url:
             return b""
         headers = dict(self.session.headers)
@@ -1364,7 +1364,7 @@ class MetadataClient:
 
     def _douban_episode_page(self, sid: str, season: int, ep: int) -> dict:
         if getattr(self, "offline", False):
-            return None
+            return []
         """抓一页豆瓣分集页，返回 {ok, title, reason}。
 
         豆瓣的分集页路径只按“集”编号（/episode/<N>/），季由豆瓣条目本身

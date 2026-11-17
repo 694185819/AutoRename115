@@ -193,10 +193,41 @@ def check_env() -> str:
     return tok
 
 
-def run_tests() -> None:
-    step("跑快速回归")
-    r = run([PY, os.path.join(BASE, "work", "tests", "run_all.py")],
-            check=False)
+RELEASE_STAMP = os.path.join(BASE, ".last_release")
+
+
+def changed_modules() -> list[str]:
+    """找出上次发版之后改动过的 app 模块（不带扩展名）。"""
+    try:
+        since = os.path.getmtime(RELEASE_STAMP)
+    except OSError:
+        return []          # 没有标记 → 不知道改了什么
+    app_dir = os.path.join(BASE, "app")
+    mods: list[str] = []
+    for f in os.listdir(app_dir):
+        if not f.endswith(".py") or f.startswith("__"):
+            continue
+        try:
+            if os.path.getmtime(os.path.join(app_dir, f)) > since:
+                mods.append(f[:-3])
+        except OSError:
+            continue
+    return sorted(mods)
+
+
+def run_tests(all_tests: bool = False) -> None:
+    mods = [] if all_tests else changed_modules()
+    if mods:
+        step(f"跑回归（改动模块：{', '.join(mods)}）")
+        args = [PY, os.path.join(BASE, "work", "tests", "run_all.py"),
+                "--for", ",".join(mods)]
+    elif all_tests:
+        step("跑全量回归")
+        args = [PY, os.path.join(BASE, "work", "tests", "run_all.py"), "--all"]
+    else:
+        step("跑快速回归")
+        args = [PY, os.path.join(BASE, "work", "tests", "run_all.py")]
+    r = run(args, check=False)
     tail = (r.stdout or "").strip().splitlines()
     for line in tail[-8:]:
         print("  " + line)
@@ -436,6 +467,8 @@ def main() -> None:
                     help="只检查，不打包不发布")
     ap.add_argument("--skip-tests", action="store_true",
                     help="跳过回归测试")
+    ap.add_argument("--all-tests", action="store_true",
+                    help="跑全量回归（默认只跑改动涉及的模块）")
     ap.add_argument("--notes", help="Release 说明的 Markdown 文件路径")
     args = ap.parse_args()
 
@@ -446,7 +479,7 @@ def main() -> None:
     tok = check_env()
 
     if not args.skip_tests:
-        run_tests()
+        run_tests(all_tests=args.all_tests)
     else:
         warn("已跳过回归测试")
 
@@ -470,6 +503,13 @@ def main() -> None:
     # 每次顺带确保旧仓库那条迁移提示还在，旧用户才有机会看到。
     announce_migration(
         tok, f"https://github.com/{OWNER}/{RELEASE_REPO}")
+
+    # 记录发版时间，下次用它判断「哪些模块改过」
+    try:
+        with open(RELEASE_STAMP, "w", encoding="utf-8") as f:
+            f.write(version)
+    except OSError:
+        pass
 
     step("完成")
     print(f"  版本   {version}")

@@ -682,7 +682,25 @@ def _titles_related(query: str, title: str) -> bool:
     # 包含关系（“将夜”与“将夜 第一季”）
     if a in b or b in a:
         return True
-    return titles_agree(query, title)
+    if titles_agree(query, title):
+        return True
+    # 跨语言别名放行：一边是中日文、另一边是拉丁字母，且都够长。
+    #   「复仇的安魂曲」vs「Gundam Requiem for Vengeance」→ 允许
+    #   「东离剑游记」vs「Friends」→ 也允许（但 Friends 不是这部作品的
+    #   英文名，搜不到时自然没有结果，不会污染出错误匹配）
+    # 优先保证「中文名 + 英文名」这种常见并列能进入搜索词——
+    # 否则中文名搜不到时，明明文件名里有英文名也用不上。
+    _cjk = re.compile(r"[\u3400-\u9fff\u3040-\u30ff]")
+    _lat = re.compile(r"[A-Za-z]")
+    q_has_cjk = bool(_cjk.search(query or ""))
+    t_has_cjk = bool(_cjk.search(title or ""))
+    q_has_lat = bool(_lat.search(query or ""))
+    t_has_lat = bool(_lat.search(title or ""))
+    if len(a) >= 3 and len(b) >= 3:
+        if (q_has_cjk and t_has_lat and not q_has_lat) or \
+                (t_has_cjk and q_has_lat and not t_has_lat):
+            return True
+    return False
 
 
 def _parallel_aliases(text: str) -> list[str]:
@@ -2038,6 +2056,18 @@ class Planner:
             self.log(f"元数据搜索失败：{parsed.title}：{e}")
             return MatchResult()
         self._trace_match(parsed, res)
+
+        # ① 完全没搜到：换用其它语言的名字再搜一轮
+        #    中文名搜不到（译名不同、站点没收录）时，英文名往往能中。
+        #    离线（测试）时不触发——那时「搜不到」是预期结果，
+        #    再搜一次只会改变对象、让流程漂移。
+        if (not res or not res.confidence) and \
+                not getattr(self.metadata, "offline", False):
+            alt = self._cross_language_retry(parsed, media_type,
+                                             category_hint)
+            if alt is not None:
+                res = alt
+
         fixed = self._retry_with_file_title(parsed, media_type,
                                             category_hint, res)
         if fixed is not None:

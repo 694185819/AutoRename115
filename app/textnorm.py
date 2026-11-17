@@ -101,6 +101,44 @@ def _is_spinoff_pair(a: str, b: str) -> bool:
     return bool(wa) or bool(wb)
 
 
+def _latin_after_head(title: str) -> str:
+    """取中文主名之后的拉丁片段（小写）。没有则返回空串。"""
+    t = unicodedata.normalize("NFKC", title or "").strip()
+    m = _RE_CJK_HEAD.match(t)
+    if not m:
+        return ""
+    rest = t[m.end():]
+    words = re.findall(r"[A-Za-z]{2,}", rest)
+    return " ".join(words).lower()
+
+
+def _same_latin_tail(a: str, b: str) -> bool:
+    """主名之后是否指向同一部作品。
+
+    · 两边都没有拉丁尾巴 → 同一部（如「进击的巨人」vs「进击的巨人」）
+    · 只有一边有 → 视为不同部，保守不合并
+    · 两边都有 → 比较相似度
+          「Shingeki no kyojin Kuriboh Oure」vs「Shingeki no kyojin 日版更替」
+              → 前两个词相同，同一部
+          「THE GHOST IN THE SHELL」vs「SAC 2045」
+              → 没有共同词，不同部
+    """
+    la, lb = _latin_after_head(a), _latin_after_head(b)
+    if not la and not lb:
+        return True
+    if not la or not lb:
+        return False
+    wa = {w for w in la.split() if len(w) >= 3}
+    wb = {w for w in lb.split() if len(w) >= 3}
+    if not wa or not wb:
+        return False
+    common = wa & wb
+    if not common:
+        return False
+    # 有共同词就认为同一部：发布组/版本说明不影响
+    return True
+
+
 def titles_agree(a: str, b: str) -> bool:
     na, nb = norm_title(a), norm_title(b)
     if not na or not nb:
@@ -119,7 +157,12 @@ def titles_agree(a: str, b: str) -> bool:
     # 整串比较会失败，但中文主名是可靠的同一性依据。
     ha, hb = cjk_head(a), cjk_head(b)
     if ha and hb and len(ha) >= 2 and len(hb) >= 2 and ha == hb:
-        return True
+        # 主名相同时，再看主名之后的英文部分是否指向同一部作品：
+        #   Shingeki no kyojin Kuriboh Oure  vs  Shingeki no kyojin 日版更替
+        #       → 有共同词，同一部（发布组/版本说明不影响）
+        #   THE GHOST IN THE SHELL  vs  SAC 2045
+        #       → 无共同词，同系列的另一部作品，不能合并
+        return _same_latin_tail(a, b)
     return False
 
 
