@@ -2041,7 +2041,9 @@ class Planner:
         fixed = self._retry_with_file_title(parsed, media_type,
                                             category_hint, res)
         if fixed is not None:
-            res = fixed
+            # 重搜已确认「新结果与备用片名一致」，不能再拿旧标题去校验，
+            # 否则刚命中的正确条目会被自己的校验重新打回 review。
+            return fixed
         self._verify_match_titles(parsed, res)
         return res
 
@@ -4416,8 +4418,12 @@ class Planner:
              (_parent_is_same_show and
               (looks_like_season_dir(mr.item.name) or
                is_season_dir(mr.item.name)))))
+        # 只有当前分析对象是**目录**时才改文件夹名。
+        # 用户直接选中视频文件时，analyze() 会把文件包成一个 MediaRoot，
+        # 但 mr.item 仍是文件本身——不加这道判断就会给视频文件生成
+        # 一条 is_dir=True 的改名操作，和视频自己那条撞车。
         if plan.rename_root and not plan.context.get("is_container") and \
-                not _self_is_plain_season:
+                mr.item.is_dir and not _self_is_plain_season:
             ident = plan.identity
             folder_name = self._folder_name(
                 plan, title, year, ident.imdb_id, ident.tmdb_id)
