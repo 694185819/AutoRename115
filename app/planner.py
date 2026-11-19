@@ -1890,14 +1890,26 @@ class Planner:
         """根目录同时有季目录和独立电影时，拆成剧集 + 电影任务。"""
         plans: list[PlanItem] = []
         rename_root = not generic and not is_season_dir(mr.item.name)
-        series = self._series_plan(client, mr, season_entries, folder_parsed,
+        # 根目录直属的剧集视频也要并入 series：以前只给 season_entries，
+        # 根目录里的正片会被完全丢弃（既不在季目录、也不算电影）。
+        root_series_entries = [
+            e for e in videos
+            if e.folder_season is None
+            and not self._is_root_movie_extra(e)
+            and e.parsed.episode is not None]
+        series_entries = list(season_entries) + root_series_entries
+        series = self._series_plan(client, mr, series_entries, folder_parsed,
                                    rename_root=rename_root,
                                    is_container=False)
         if series:
             plans.append(series)
 
+        # 已经在 series 里的文件不再重复进入电影分组
+        _in_series = {e.item.fid for e in root_series_entries}
         extras = [e for e in videos
-                  if e.folder_season is None and self._is_root_movie_extra(e)]
+                  if e.folder_season is None
+                  and self._is_root_movie_extra(e)
+                  and e.item.fid not in _in_series]
         groups: dict[str, list[FileEntry]] = {}
         for e in extras:
             key = norm_title(e.parsed.title) or e.item.stem
@@ -4209,7 +4221,9 @@ class Planner:
                     else:
                         season = 1
                         confirmed = True
-                ep = e.parsed.episode
+            # 集号统一在这里取：以前只在 else 分支里赋值，
+            # 走 elif（如根目录的 SxxExx 文件）时 ep 是残留值。
+            ep = e.parsed.episode
             if ep is not None and ep <= 0:
                 notes.append(f"{e.item.name} 的集号是 0，可能是菜单/花絮，已跳过。")
                 ep = None
