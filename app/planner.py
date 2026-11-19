@@ -237,8 +237,15 @@ def _is_meaningless_title(title: str) -> bool:
     # 01、02 这种两位序号；以及 01.m2ts / 02 mkv 这类文件名本身。
     if re.fullmatch(r"0\d{1,5}", t):
         return True
+    # 00001.m2ts / 00012.mkv：5 位补零 + 扩展名
     if re.fullmatch(
-            r"(?i)\d{1,4}\s*[.\s]\s*(?:mkv|mp4|avi|mov|wmv|flv|webm|m4v|"
+            r"(?i)\d{1,6}\s*[.\s]\s*(?:mkv|mp4|avi|mov|wmv|flv|webm|"
+            r"m4v|ts|m2ts|mts|mpg|mpeg|vob|iso|rmvb|rm|3gp|ogv|divx|"
+            r"ass|ssa|srt|sup|sub|idx|vtt|flac|aac|m4a|mp3|wav|dts|"
+            r"ac3|eac3|opus|nfo)", t):
+        return True
+    if re.fullmatch(
+            r"(?i)\d{1,6}\s*[.\s]\s*(?:mkv|mp4|avi|mov|wmv|flv|webm|m4v|"
             r"ts|m2ts|mts|mpg|mpeg|vob|iso|rmvb|rm|3gp|ogv|divx|"
             r"ass|ssa|srt|sup|sub|idx|vtt|flac|aac|m4a|mp3|wav|dts|"
             r"ac3|eac3|opus|nfo)(?!\w)", t):
@@ -1971,7 +1978,12 @@ class Planner:
         if not prefer_file_title:
             extra.extend(folder_parsed.queries or [])
         for e in title_entries:
-            extra.extend(e.parsed.queries or [])
+            for q in (e.parsed.queries or []):
+                q = str(q or "").strip()
+                # 纯编号文件名（00001 / 01.m2ts）不能当搜索词
+                if not q or _is_meaningless_title(q):
+                    continue
+                extra.append(q)
         # 「[末日后酒店][Apocalypse Hotel][アポカリプスホテル]」这种
         # 同一条目录名里并列的多语言名，都是这部作品的别名。
         parallel = _parallel_aliases(mr.item.name)
