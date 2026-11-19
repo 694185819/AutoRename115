@@ -2077,6 +2077,81 @@ class Planner:
         self._verify_match_titles(parsed, res)
         return res
 
+    def _cross_language_retry(self, parsed: ParsedName, media_type: str,
+                              category_hint: str) -> "MatchResult | None":
+        """主名搜不到时，用另一种语言的名字再搜一次。
+
+        发布者的英文名/日文名与外网平台常不一致，只拿中文名搜会全空。
+        这时换语言再试，往往能命中。
+
+        触发前提（全部满足）：
+          · 主名为空或第一轮完全没搜到
+          · 本地还有**另一种语言**的名字（一边 CJK、一边拉丁）
+          · 环境允许联网
+
+        最多再试 2 个词，避免请求量暴涨。
+        """
+        import re as _re
+        cjk = _re.compile(r"[\u3400-\u9fff\u3040-\u30ff]")
+        lat = _re.compile(r"[A-Za-z]")
+
+        title = (parsed.title or "").strip()
+        if not title:
+            return None
+        main_is_cjk = bool(cjk.search(title))
+
+        # 收集候选：queries + 视频文件名里的片名
+        cands: list[str] = []
+        for q in (parsed.queries or []):
+            q = str(q or "").strip()
+            if q and q != title:
+                cands.append(q)
+        try:
+            for e in (self._current_entries or []):
+                if not e.is_video:
+                    continue
+                t = str(getattr(e.parsed, "title", "") or "").strip()
+                if t and t != title:
+                    cands.append(t)
+        except Exception:      # noqa: BLE001
+            pass
+
+        # 只留「与主名不同语言」的候选
+        cross: list[str] = []
+        for c in cands:
+            if main_is_cjk and lat.search(c) and not cjk.search(c):
+                cross.append(c)
+            elif not main_is_cjk and cjk.search(c):
+                cross.append(c)
+        if not cross:
+            return None
+
+        seen: set[str] = set()
+        tried = 0
+        for alt in sorted(set(cross), key=len, reverse=True):
+            key = alt.lower()
+            if key in seen or len(alt) < 3:
+                continue
+            seen.add(key)
+            if tried >= 2:
+                break
+            tried += 1
+            try:
+                probe = ParsedName(raw=alt, title=alt, queries=[alt],
+                                   year=parsed.year, season=parsed.season)
+                again = self.metadata.match(probe, media_type, category_hint)
+            except Exception as e:      # noqa: BLE001
+                self.log(f"[换语言重搜] 用「{alt}」失败：{e}")
+                continue
+            if again and again.confidence:
+                again.notes.append(
+                    f"「{title}」没有搜到结果，已改用另一种语言的名字"
+                    f"「{alt}」重搜并命中。")
+                self.log(f"[换语言重搜]「{title}」落空，改用「{alt}」命中。")
+                self._trace_match(probe, again)
+                return again
+        return None
+
     def _retry_with_file_title(self, parsed: ParsedName, media_type: str,
                                category_hint: str,
                                res: MatchResult) -> "MatchResult | None":
